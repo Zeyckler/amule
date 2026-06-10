@@ -17,7 +17,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: aMule\n"
 "Report-Msgid-Bugs-To: https://github.com/amule-org/amule/issues\n"
-"POT-Creation-Date: 2026-06-10 16:42+0200\n"
+"POT-Creation-Date: 2026-06-10 20:35+0200\n"
 "PO-Revision-Date: 2020-03-04 15:06+0100\n"
 "Last-Translator: Luís Picciochi Oliveira <Pitxyoki@Gmail.com>\n"
 "Language-Team: Portuguese <traduz@debianpt.org>\n"
@@ -121,7 +121,7 @@ msgstr[0] ""
 msgstr[1] ""
 
 #: src/amuleAppCommon.cpp:176 src/amule.cpp:866 src/amule.cpp:980
-#: src/amule.cpp:1275 src/amule-remote-gui.cpp:462 src/amule-remote-gui.cpp:514
+#: src/amule.cpp:1276 src/amule-remote-gui.cpp:462 src/amule-remote-gui.cpp:514
 #: src/amule-remote-gui.cpp:527 src/amule-remote-gui.cpp:545
 #: src/amule-remote-gui.cpp:880 src/amule-remote-gui.cpp:909
 #: src/DownloadQueue.cpp:1444
@@ -170,7 +170,7 @@ msgstr "Resultados da depuração de memória para a saída do aMule:"
 msgid "Your locale has been changed to System Default due to a configuration change. Sorry."
 msgstr "O seu idioma foi alterado para a predefinição do sistema devido a uma mudança de configuração. Desculpe."
 
-#: src/amule.cpp:574 src/amule.cpp:1264 src/CatDialog.cpp:141
+#: src/amule.cpp:574 src/amule.cpp:1265 src/CatDialog.cpp:141
 #: src/CatDialog.cpp:151 src/CatDialog.cpp:163 src/ServerList.cpp:355
 #: src/ServerListCtrl.cpp:149
 msgid "Info"
@@ -282,14 +282,19 @@ msgid "More information, support and new releases can found at our homepage,\n"
 msgstr "Mais informação, suporte e novos lançamentos na nossa página,\n"
 
 #: src/amule.cpp:1260
-msgid "at https://amule-org.github.io, or in our IRC channel #aMule at irc.libera.chat.\n"
+#, fuzzy
+msgid "at https://amule-org.github.io, in our IRC channel #aMule at irc.libera.chat\n"
 msgstr "em amule-org.github.io ou no canal de IRC #aMule em irc.libera.chat.\n"
 
-#: src/amule.cpp:1262
+#: src/amule.cpp:1261
+msgid "or in our matrix room #amule:matrix.org\n"
+msgstr ""
+
+#: src/amule.cpp:1263
 msgid "Feel free to report any bugs to https://github.com/amule-org/amule/issues"
 msgstr "Esteja à vontade para comunicar erros para https://github.com/amule-org/amule/issues"
 
-#: src/amule.cpp:1275
+#: src/amule.cpp:1276
 msgid ""
 "The folder for Online Signature files you specified is INVALID!\n"
 " OnlineSignature will be DISABLED until you fix it on preferences."
@@ -297,137 +302,137 @@ msgstr ""
 "A pasta para os ficheiros da Assinatura Online é INVÁLIDA!\n"
 " A Assinatura Online será DESACTIVADA até que resolva a situação nas preferências."
 
-#: src/amule.cpp:1338
+#: src/amule.cpp:1339
 msgid "Server hostname notified"
 msgstr "Servidor notificado"
 
-#: src/amule.cpp:1662
+#: src/amule.cpp:1663
 #, c-format
 msgid "Disk space preallocation for file '%s' failed: %s"
 msgstr "Reserva de espaço em disco para o ficheiro '%s' falhou: %s"
 
-#: src/amule.cpp:1795
+#: src/amule.cpp:1796
 msgid "ERROR: can't open logfile"
 msgstr "ERRO: não é possível abrir o ficheiro de relatório"
 
-#: src/amule.cpp:1799
+#: src/amule.cpp:1800
 msgid "WARNING: logfile is empty. Something is wrong."
 msgstr "AVISO: o ficheiro de relatório está vazio. Algo está mal."
 
-#: src/amule.cpp:1816
+#: src/amule.cpp:1817
 msgid "Log has been reset"
 msgstr "O relatório foi limpo"
 
-#: src/amule.cpp:1842
+#: src/amule.cpp:1843
 #, c-format
 msgid "ServerMessage: %s"
 msgstr "Mensagem do servidor: %s"
 
-#: src/amule.cpp:1884 src/IP2Country.cpp:154 src/IPFilter.cpp:510
+#: src/amule.cpp:1885 src/IP2Country.cpp:154 src/IPFilter.cpp:510
 #: src/ServerList.cpp:870
 #, c-format
 msgid "Skipped download of %s, because requested file is not newer."
 msgstr "O download de %s não foi feito porque o ficheiro requisitado não é mais recente."
 
-#: src/amule.cpp:1886
+#: src/amule.cpp:1887
 msgid "Failed to download the nodes list."
 msgstr "Falha ao transferir a lista de nós."
 
-#: src/amule.cpp:1906
+#: src/amule.cpp:1907
 msgid "Failed to open the downloaded version check file"
 msgstr "Falha ao abrir o ficheiro de verificação de versão transferido"
 
-#: src/amule.cpp:1909 src/amule.cpp:1928 src/amule.cpp:1959 src/amule.cpp:1980
+#: src/amule.cpp:1910 src/amule.cpp:1929 src/amule.cpp:1960 src/amule.cpp:1981
 msgid "Corrupted version check file"
 msgstr "Ficheiro de verificação de versão corrompido"
 
-#: src/amule.cpp:1991
+#: src/amule.cpp:1992
 msgid "You are using an outdated version of aMule!"
 msgstr "Está a usar uma versão antiga do aMule!"
 
-#: src/amule.cpp:1993
+#: src/amule.cpp:1994
 #, c-format
 msgid "Your aMule version is %i.%i.%i and the latest version is %li.%li.%li"
 msgstr "A sua versão do aMule é %i.%i.%i e a última versão é %li.%li.%li"
 
-#: src/amule.cpp:1994
+#: src/amule.cpp:1995
 msgid "The latest version can always be found at https://github.com/amule-org/amule/releases/latest"
 msgstr "A última versão pode ser sempre encontrada em https://github.com/amule-org/amule/releases/latest"
 
-#: src/amule.cpp:1996
+#: src/amule.cpp:1997
 #, c-format
 msgid "WARNING: Your aMuled version is outdated: %i.%i.%i < %li.%li.%li"
 msgstr "AVISO: A sua versão do aMuled está desactualizada: %i.%i.%i < %li.%li.%li"
 
-#: src/amule.cpp:2000
+#: src/amule.cpp:2001
 msgid "Your copy of aMule is up to date."
 msgstr "A sua cópia do aMule está actualizada."
 
-#: src/amule.cpp:2007
+#: src/amule.cpp:2008
 msgid "Failed to download the version check file"
 msgstr "Falha ao transferir o ficheiro de verificação de versão"
 
-#: src/amule.cpp:2177 src/amule-remote-gui.cpp:749
+#: src/amule.cpp:2178 src/amule-remote-gui.cpp:749
 #, c-format
 msgid "Users: %s | Files: %s"
 msgstr "Utilizadores: %s | Ficheiros: %s"
 
-#: src/amule.cpp:2178 src/amule-remote-gui.cpp:750
+#: src/amule.cpp:2179 src/amule-remote-gui.cpp:750
 #, c-format
 msgid "Users: E: %s K: %s | Files: E: %s K: %s"
 msgstr "Utilizadores: E: %s K: %s | Ficheiros: E: %s K: %s"
 
-#: src/amule.cpp:2187 src/amule-remote-gui.cpp:759
+#: src/amule.cpp:2188 src/amule-remote-gui.cpp:759
 msgid "No networks selected"
 msgstr "Não foram seleccionadas redes"
 
-#: src/amule.cpp:2229 src/TextClient.cpp:806
+#: src/amule.cpp:2230 src/TextClient.cpp:806
 msgid "with LowID"
 msgstr "com LowID"
 
-#: src/amule.cpp:2229 src/TextClient.cpp:806
+#: src/amule.cpp:2230 src/TextClient.cpp:806
 msgid "with HighID"
 msgstr "com HighID"
 
-#: src/amule.cpp:2231
+#: src/amule.cpp:2232
 #, c-format
 msgid "Connected to %s %s"
 msgstr "Ligado a %s %s"
 
-#: src/amule.cpp:2235
+#: src/amule.cpp:2236
 #, c-format
 msgid "Connecting to %s"
 msgstr "A ligar a %s"
 
-#: src/amule.cpp:2237
+#: src/amule.cpp:2238
 msgid "Disconnected from eD2k"
 msgstr "Desligado da eD2k"
 
-#: src/amule.cpp:2245
+#: src/amule.cpp:2246
 msgid "Kad started."
 msgstr "Kad iniciada."
 
-#: src/amule.cpp:2247
+#: src/amule.cpp:2248
 msgid "Kad stopped."
 msgstr "Kad parada."
 
-#: src/amule.cpp:2255
+#: src/amule.cpp:2256
 msgid "Connected to Kad (ok)"
 msgstr "Ligado à Kad (ok)"
 
-#: src/amule.cpp:2257
+#: src/amule.cpp:2258
 msgid "Connected to Kad (firewalled)"
 msgstr "Ligado à Kad (atrás de firewall)"
 
-#: src/amule.cpp:2260
+#: src/amule.cpp:2261
 msgid "Disconnected from Kad"
 msgstr "Desligado da Kad"
 
-#: src/amule.cpp:2292
+#: src/amule.cpp:2293
 msgid "Kad network cannot be used if UDP port is disabled on preferences, not starting."
 msgstr "A rede Kad não pode ser usada se o porto UDP estiver desactivado nas preferências, inicialização não efectuada."
 
-#: src/amule.cpp:2295
+#: src/amule.cpp:2296
 msgid "Kad network disabled on preferences, not connecting."
 msgstr "Rede Kad desligada nas preferências, a ligação não será efectuada."
 

@@ -252,15 +252,13 @@ modules:
     sources:
       - type: git
         url: https://github.com/amule-org/amule.git
-        # Pinned to a master tip newer than the 3.0.0 tag to ship
-        # post-release fixes. Flatpak still self-identifies as 3.0.0
-        # (source version macro unchanged). Tag is intentionally
-        # omitted: flatpak-builder requires that any tag specified
-        # alongside a commit must resolve to that exact commit, so a
-        # tip-of-master pin past the release tag can only be commit-
-        # only. The x-checker-data block below still drives auto-
-        # update PRs against new aMule release tags.
-        commit: cc9460c5b48b19dbc1a271289d48a9204d75bf1f
+        # Pinned to the 3.0.1 release. `commit` is the peeled commit the
+        # annotated 3.0.1 tag resolves to (git rev-parse 3.0.1^{commit});
+        # flatpak-builder requires the tag and commit point at the same
+        # commit. The x-checker-data block below drives auto-update PRs
+        # against future aMule release tags.
+        tag: 3.0.1
+        commit: 02db0d7faecfc377694ff6242bc23346185990ed
         disable-shallow-clone: true
         x-checker-data:
           type: git

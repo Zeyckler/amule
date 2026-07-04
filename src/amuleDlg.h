@@ -104,6 +104,27 @@ enum ClientSkinEnum
 	CLIENT_SKIN_SIZE
 };
 
+// Indexes into CamuleDlg::m_tblist. Must match the order of the
+// Add_Skin_Icon("Toolbar_...") calls in Apply_Toolbar_Skin.
+enum ToolbarSkinEnum
+{
+	Toolbar_Connect = 0,
+	Toolbar_Disconnect,
+	Toolbar_Connecting,
+	Toolbar_Network,
+	Toolbar_Transfers,
+	Toolbar_Search,
+	Toolbar_Shared,
+	Toolbar_Messages,
+	Toolbar_Stats,
+	Toolbar_Prefs,
+	Toolbar_Import,
+	Toolbar_About,
+	Toolbar_Blink,
+	// Add items here.
+	TOOLBAR_SKIN_SIZE
+};
+
 // CamuleDlg Dialogfeld
 class CamuleDlg : public wxFrame
 {

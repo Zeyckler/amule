@@ -29,12 +29,15 @@
 #include "config.h" // for ENABLE_VERSION_CHECK (gates the startup version-check members)
 
 #include <wx/archive.h>
+#include <wx/bmpbndl.h>
 #include <wx/filename.h>
 #include <wx/frame.h> // Needed for wxFrame
 #include <wx/imaglist.h>
 #include <wx/timer.h>
 #include <wx/wfstream.h>
 #include <wx/zipstrm.h>
+
+#include <vector>
 
 #include "Types.h" // Needed for uint32
 #include "StatisticsDlg.h"
@@ -198,7 +201,11 @@ public:
 	bool m_lastShownValid;
 
 	wxImageList m_imagelist;
-	wxImageList m_tblist;
+	// Toolbar icons as resolution-aware bundles (the 32x32 art plus a
+	// smooth 2x upscale). The executable is per-monitor-DPI aware, so a
+	// plain 32px wxBitmap would be drawn at 32 *physical* pixels — tiny
+	// and blurry on hi-DPI screens.
+	std::vector<wxBitmapBundle> m_tblist;
 
 protected:
 	void OnToolBarButton(wxCommandEvent &ev);

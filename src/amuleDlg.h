@@ -29,12 +29,15 @@
 #include "config.h" // for ENABLE_VERSION_CHECK (gates the startup version-check members)
 
 #include <wx/archive.h>
+#include <wx/bmpbndl.h>
 #include <wx/filename.h>
 #include <wx/frame.h> // Needed for wxFrame
 #include <wx/imaglist.h>
 #include <wx/timer.h>
 #include <wx/wfstream.h>
 #include <wx/zipstrm.h>
+
+#include <vector>
 
 #include "Types.h" // Needed for uint32
 #include "StatisticsDlg.h"
@@ -99,6 +102,27 @@ enum ClientSkinEnum
 	Client_Encryption_Smiley,
 	// Add items here.
 	CLIENT_SKIN_SIZE
+};
+
+// Indexes into CamuleDlg::m_tblist. Must match the order of the
+// Add_Skin_Icon("Toolbar_...") calls in Apply_Toolbar_Skin.
+enum ToolbarSkinEnum
+{
+	Toolbar_Connect = 0,
+	Toolbar_Disconnect,
+	Toolbar_Connecting,
+	Toolbar_Network,
+	Toolbar_Transfers,
+	Toolbar_Search,
+	Toolbar_Shared,
+	Toolbar_Messages,
+	Toolbar_Stats,
+	Toolbar_Prefs,
+	Toolbar_Import,
+	Toolbar_About,
+	Toolbar_Blink,
+	// Add items here.
+	TOOLBAR_SKIN_SIZE
 };
 
 // CamuleDlg Dialogfeld
@@ -198,7 +222,11 @@ public:
 	bool m_lastShownValid;
 
 	wxImageList m_imagelist;
-	wxImageList m_tblist;
+	// Toolbar icons as resolution-aware bundles (the 32x32 art plus a
+	// smooth 2x upscale). The executable is per-monitor-DPI aware, so a
+	// plain 32px wxBitmap would be drawn at 32 *physical* pixels — tiny
+	// and blurry on hi-DPI screens.
+	std::vector<wxBitmapBundle> m_tblist;
 
 protected:
 	void OnToolBarButton(wxCommandEvent &ev);

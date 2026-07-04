@@ -182,14 +182,13 @@ CamuleDlg::CamuleDlg(wxWindow *pParent, const wxString &title, wxPoint where, wx
 , m_lastShownMaximized(false)
 , m_lastShownValid(false)
 , m_imagelist(16, 16)
-, m_tblist(32, 32)
 , m_prefsVisible(false)
 , m_wndToolbar(NULL)
 , m_wndTaskbarNotifier(NULL)
 , m_nActiveDialog(DT_NETWORKS_WND)
 , m_is_safe_state(false)
 , m_BlinkMessages(false)
-, m_CurrentBlinkBitmap(24)
+, m_CurrentBlinkBitmap(Toolbar_Messages)
 , m_last_iconizing(0)
 , m_skinFileName()
 , m_clientSkinNames(CLIENT_SKIN_SIZE)
@@ -888,24 +887,24 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 
 		wxToolBarToolBase *toolbarTool = m_wndToolbar->FindById(ID_BUTTONCONNECT);
 
-		int bitmapIdx = 0;
+		int bitmapIdx = Toolbar_Connect;
 		switch (currentState) {
 		case ECS_Connecting:
 			toolbarTool->SetLabel(_("Cancel"));
 			toolbarTool->SetShortHelp(_("Stop the current connection attempts"));
-			bitmapIdx = 2;
+			bitmapIdx = Toolbar_Connecting;
 			break;
 
 		case ECS_Connected:
 			toolbarTool->SetLabel(_("Disconnect"));
 			toolbarTool->SetShortHelp(_("Disconnect from the currently connected networks"));
-			bitmapIdx = 1;
+			bitmapIdx = Toolbar_Disconnect;
 			break;
 
 		default:
 			toolbarTool->SetLabel(_("Connect"));
 			toolbarTool->SetShortHelp(_("Connect to the currently enabled networks"));
-			bitmapIdx = 0;
+			bitmapIdx = Toolbar_Connect;
 		}
 
 		// wxToolBarToolBase::SetNormalBitmap only updates the C++ tool
@@ -916,14 +915,8 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 		// connect-state transition paints atomically with the new
 		// bitmap on the next redraw — without forcing a re-layout that
 		// would disrupt a vertical toolbar's orientation measurement.
-		// Same pattern as SetMessagesTool() just below. wxCocoa keeps
-		// the tool path because SetToolNormalBitmap isn't fully wired
-		// on the OS X NSToolbar backend. (#800)
-#ifdef __WXCOCOA__
-		toolbarTool->SetNormalBitmap(m_tblist.GetBitmap(bitmapIdx));
-#else
-		m_wndToolbar->SetToolNormalBitmap(ID_BUTTONCONNECT, m_tblist.GetBitmap(bitmapIdx));
-#endif
+		// Same pattern as SetMessagesTool() just below. (#800)
+		m_wndToolbar->SetToolNormalBitmap(ID_BUTTONCONNECT, m_tblist[bitmapIdx]);
 
 		m_wndToolbar->EnableTool(ID_BUTTONCONNECT,
 			(thePrefs::GetNetworkED2K() || thePrefs::GetNetworkKademlia()) &&
@@ -1346,12 +1339,12 @@ void CamuleDlg::OnGUITimer(wxTimerEvent &WXUNUSED(evt))
 
 	if (msCur - msPrev1 > 1000) { // every second
 		msPrev1 = msCur;
-		if (m_CurrentBlinkBitmap == 12) {
-			m_CurrentBlinkBitmap = 7;
+		if (m_CurrentBlinkBitmap == Toolbar_Blink) {
+			m_CurrentBlinkBitmap = Toolbar_Messages;
 			SetMessagesTool();
 		} else {
 			if (m_BlinkMessages) {
-				m_CurrentBlinkBitmap = 12;
+				m_CurrentBlinkBitmap = Toolbar_Blink;
 				SetMessagesTool();
 			}
 		}
@@ -1361,11 +1354,7 @@ void CamuleDlg::OnGUITimer(wxTimerEvent &WXUNUSED(evt))
 void CamuleDlg::SetMessagesTool()
 {
 	wxWindowUpdateLocker freezer(m_wndToolbar);
-#ifdef __WXCOCOA__
-	m_wndToolbar->FindById(ID_BUTTONMESSAGES)->SetNormalBitmap(m_tblist.GetBitmap(m_CurrentBlinkBitmap));
-#else
-	m_wndToolbar->SetToolNormalBitmap(ID_BUTTONMESSAGES, m_tblist.GetBitmap(m_CurrentBlinkBitmap));
-#endif
+	m_wndToolbar->SetToolNormalBitmap(ID_BUTTONMESSAGES, m_tblist[m_CurrentBlinkBitmap]);
 }
 
 void CamuleDlg::LaunchUrl(const wxString &url)
@@ -1476,7 +1465,23 @@ void CamuleDlg::Add_Skin_Icon(const wxString &iconName, const wxBitmap &stdIcon,
 	if (iconName.StartsWith("Client_")) {
 		m_imagelist.Add(bmp);
 	} else if (iconName.StartsWith("Toolbar_")) {
-		m_tblist.Add(bmp);
+		// The toolbar art only exists at one (32x32) size. Store it as a
+		// wxBitmapBundle with a smooth 2x upscale so DPI-aware toolbars
+		// pick a correctly sized bitmap on hi-DPI screens instead of
+		// drawing the 1x art at a tiny physical size. The mask is turned
+		// into an alpha channel first, because high-quality scaling of a
+		// masked image smears the mask colour into the icon edges.
+		wxImage img = bmp.ConvertToImage();
+		if (img.IsOk()) {
+			if (!img.HasAlpha()) {
+				img.InitAlpha();
+			}
+			m_tblist.push_back(wxBitmapBundle::FromBitmaps(bmp,
+				wxBitmap(img.Scale(
+					img.GetWidth() * 2, img.GetHeight() * 2, wxIMAGE_QUALITY_HIGH))));
+		} else {
+			m_tblist.emplace_back(bmp);
+		}
 	}
 }
 
@@ -1498,9 +1503,9 @@ void CamuleDlg::Apply_Toolbar_Skin(wxToolBar *wndToolbar)
 	bool useSkins = Check_and_Init_Skin();
 
 	// Clear the toolbar image list
-	m_tblist.RemoveAll();
+	m_tblist.clear();
 
-	// Add the images to the image list
+	// Add the images to the image list, in ToolbarSkinEnum order
 	Add_Skin_Icon("Toolbar_Connect", connButImg(0), useSkins);
 	Add_Skin_Icon("Toolbar_Disconnect", connButImg(1), useSkins);
 	Add_Skin_Icon("Toolbar_Connecting", connButImg(2), useSkins);
@@ -1519,62 +1524,62 @@ void CamuleDlg::Apply_Toolbar_Skin(wxToolBar *wndToolbar)
 	wndToolbar->SetMargins(0, 0);
 
 	// Placeholder. Gets updated by ShowConnectionState
-	wndToolbar->AddTool(ID_BUTTONCONNECT, "...", m_tblist.GetBitmap(0));
+	wndToolbar->AddTool(ID_BUTTONCONNECT, "...", m_tblist[Toolbar_Connect]);
 
 	wndToolbar->AddSeparator();
 	wndToolbar->AddTool(ID_BUTTONNETWORKS,
 		_("Networks"),
-		m_tblist.GetBitmap(3),
+		m_tblist[Toolbar_Network],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Networks Window"));
 	wndToolbar->AddTool(ID_BUTTONSEARCH,
 		_("Searches"),
-		m_tblist.GetBitmap(5),
+		m_tblist[Toolbar_Search],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Searches Window"));
 	wndToolbar->AddTool(ID_BUTTONDOWNLOADS,
 		_("Downloads"),
-		m_tblist.GetBitmap(4),
+		m_tblist[Toolbar_Transfers],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Downloads Window"));
 	wndToolbar->AddTool(ID_BUTTONSHARED,
 		_("Shared files"),
-		m_tblist.GetBitmap(6),
+		m_tblist[Toolbar_Shared],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Shared Files Window"));
 	wndToolbar->AddTool(ID_BUTTONMESSAGES,
 		_("Messages"),
-		m_tblist.GetBitmap(7),
+		m_tblist[Toolbar_Messages],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Messages Window"));
 	wndToolbar->AddTool(ID_BUTTONSTATISTICS,
 		_("Statistics"),
-		m_tblist.GetBitmap(8),
+		m_tblist[Toolbar_Stats],
 		wxNullBitmap,
 		wxITEM_CHECK,
 		_("Statistics Graph Window"));
 	wndToolbar->AddSeparator();
 	wndToolbar->AddTool(ID_BUTTONNEWPREFERENCES,
 		_("Preferences"),
-		m_tblist.GetBitmap(9),
+		m_tblist[Toolbar_Prefs],
 		wxNullBitmap,
 		wxITEM_NORMAL,
 		_("Preferences Settings Window"));
 #ifndef CLIENT_GUI
 	wndToolbar->AddTool(ID_BUTTONIMPORT,
 		_("Import"),
-		m_tblist.GetBitmap(10),
+		m_tblist[Toolbar_Import],
 		wxNullBitmap,
 		wxITEM_NORMAL,
 		_("The partfile importer tool"));
 #endif
 	wndToolbar->AddTool(
-		ID_ABOUT, _("About"), m_tblist.GetBitmap(11), wxNullBitmap, wxITEM_NORMAL, _("About/Help"));
+		ID_ABOUT, _("About"), m_tblist[Toolbar_About], wxNullBitmap, wxITEM_NORMAL, _("About/Help"));
 
 	wndToolbar->ToggleTool(ID_BUTTONDOWNLOADS, true);
 
@@ -1610,7 +1615,10 @@ void CamuleDlg::Create_Toolbar(bool orientation)
 			CreateToolBar((orientation ? wxTB_VERTICAL : wxTB_HORIZONTAL) | int(wxNO_BORDER) |
 				      wxTB_TEXT | wxTB_FLAT | wxCLIP_CHILDREN | wxTB_NODIVIDER);
 
-		m_wndToolbar->SetToolBitmapSize(wxSize(32, 32));
+		// No SetToolBitmapSize() here: the tools are wxBitmapBundles, so
+		// the toolbar derives the bitmap size from the bundles' default
+		// (32 DIP) size and scales it with the monitor's DPI. Forcing a
+		// fixed size would pin the icons at 32 physical pixels again.
 	}
 
 	Apply_Toolbar_Skin(m_wndToolbar);

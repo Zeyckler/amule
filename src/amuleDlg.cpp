@@ -1480,7 +1480,7 @@ void CamuleDlg::Add_Skin_Icon(const wxString &iconName, const wxBitmap &stdIcon,
 				wxBitmap(img.Scale(
 					img.GetWidth() * 2, img.GetHeight() * 2, wxIMAGE_QUALITY_HIGH))));
 		} else {
-			m_tblist.push_back(wxBitmapBundle(bmp));
+			m_tblist.emplace_back(bmp);
 		}
 	}
 }

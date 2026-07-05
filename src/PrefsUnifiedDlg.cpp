@@ -28,6 +28,7 @@
 #include <common/Constants.h>
 #include <common/Macros.h> // Needed for itemsof()
 
+#include <wx/bmpbndl.h> // wxBitmapBundle for DPI-aware page icons
 #include <wx/colordlg.h>
 #include <wx/combobox.h> // network-interface drop-down (bind-to-interface)
 #include <wx/progdlg.h>
@@ -322,22 +323,26 @@ PrefsUnifiedDlg::PrefsUnifiedDlg(wxWindow *parent)
 #endif
 	const int kPrefsImageW = kPrefsIconW + kPrefsIconRightPad;
 	const int kPrefsImageH = kPrefsIconH + kPrefsIconBottomPad;
-	wxImageList *icon_list = new wxImageList(kPrefsImageW, kPrefsImageH);
-	m_PrefsIcons->AssignImageList(icon_list, wxIMAGE_LIST_SMALL);
 
-	// Wrap a 16x16 source bitmap into a kPrefsImageW x kPrefsImageH
-	// canvas with the source pinned to the top-left, right and bottom
-	// pads transparent. No-op when both pads are 0.
-	auto padIcon = [&](const wxBitmap &src) -> wxBitmap {
-		if (kPrefsIconRightPad == 0 && kPrefsIconBottomPad == 0) {
-			return src;
-		}
+	// The page art only exists at one (16x16) size. Wrap each icon in a
+	// wxBitmapBundle with a smooth 2x upscale so DPI-aware builds render
+	// it at the correct logical size on hi-DPI screens instead of a tiny
+	// 16-physical-pixel square (same treatment as the main toolbar). The
+	// mask is turned into an alpha channel first, because high-quality
+	// scaling needs it and the padding below must stay transparent. Each
+	// resolution is padded to its own scale of the kPrefsImageW/H canvas,
+	// source pinned to the top-left; the padding is a no-op off Mac.
+	auto makeIcon = [&](const wxBitmap &src) -> wxBitmapBundle {
 		wxImage img = src.ConvertToImage();
 		if (!img.HasAlpha()) {
 			img.InitAlpha();
 		}
-		wxImage padded = img.Size(wxSize(kPrefsImageW, kPrefsImageH), wxPoint(0, 0));
-		return wxBitmap(padded);
+		wxImage img2x = img.Scale(img.GetWidth() * 2, img.GetHeight() * 2, wxIMAGE_QUALITY_HIGH);
+		if (kPrefsIconRightPad != 0 || kPrefsIconBottomPad != 0) {
+			img = img.Size(wxSize(kPrefsImageW, kPrefsImageH), wxPoint(0, 0));
+			img2x = img2x.Size(wxSize(kPrefsImageW * 2, kPrefsImageH * 2), wxPoint(0, 0));
+		}
+		return wxBitmapBundle::FromBitmaps(wxBitmap(img), wxBitmap(img2x));
 	};
 
 	// Add the single column used
@@ -347,7 +352,8 @@ PrefsUnifiedDlg::PrefsUnifiedDlg(wxWindow *parent)
 	int width = 0;
 	int height = 0;
 
-	// Add each page to the page-list
+	// Build the page icons, in page order
+	wxVector<wxBitmapBundle> iconBundles;
 	for (unsigned int i = 0; i < itemsof(pages); ++i) {
 		// The IP2Country tab uses an embedded-PNG icon shipped via
 		// CamuleArtProvider (registered in CamuleGuiApp::OnInit) rather
@@ -356,13 +362,18 @@ PrefsUnifiedDlg::PrefsUnifiedDlg(wxWindow *parent)
 		// migration; new tabs should prefer the PNG path.
 #ifdef ENABLE_IP2COUNTRY
 		if (pages[i].m_function == PreferencesIP2CountryTab) {
-			icon_list->Add(padIcon(wxArtProvider::GetBitmap(
+			iconBundles.push_back(makeIcon(wxArtProvider::GetBitmap(
 				"amule:prefs_ip2country", wxART_OTHER, wxSize(kPrefsIconW, kPrefsIconH))));
 		} else
 #endif
 		{
-			icon_list->Add(padIcon(amuleSpecial(pages[i].m_imageidx)));
+			iconBundles.push_back(makeIcon(amuleSpecial(pages[i].m_imageidx)));
 		}
+	}
+	m_PrefsIcons->SetSmallImages(iconBundles);
+
+	// Add each page to the page-list
+	for (unsigned int i = 0; i < itemsof(pages); ++i) {
 		m_PrefsIcons->InsertItem(i, wxGetTranslation(pages[i].m_title), i);
 	}
 

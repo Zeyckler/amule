@@ -20,7 +20,7 @@ msgstr ""
 "Project-Id-Version: aMule 2.3.3\n"
 "Report-Msgid-Bugs-To: https://github.com/amule-org/amule/issues\n"
 "POT-Creation-Date: 2026-07-07 16:47+0200\n"
-"PO-Revision-Date: 2026-07-07 12:55+0000\n"
+"PO-Revision-Date: 2026-07-07 15:27+0000\n"
 "Last-Translator: got3nks <got3nks@users.noreply.github.com>\n"
 "Language-Team: SebastianoPistore.info@protonmail.ch\n"
 "Language: it\n"
@@ -7987,9 +7987,8 @@ msgid "Launch aMule automatically when the current user logs in (per-user settin
 msgstr "Avvia automaticamente aMule all'accesso dell'utente corrente (impostazione per singolo utente)."
 
 #: packaging/windows/installer_strings.c:46
-#, fuzzy
 msgid "Remove aMule application files, Start Menu / desktop shortcuts, autostart Run-key entry, URL scheme registrations, and Add/Remove Programs entry (required)."
-msgstr "Rimuove i file dell'applicazione aMule, i collegamenti del menu Start e del desktop, la voce di avvio automatico nel registro e la voce in Installazione applicazioni (obbligatorio)."
+msgstr "Rimuove i file dell'applicazione aMule, i collegamenti del menu Start e del desktop, la voce di avvio automatico nel registro, le registrazioni degli schemi URL e la voce in Installazione applicazioni (obbligatorio)."
 
 #: packaging/windows/installer_strings.c:47
 msgid "Permanently delete %APPDATA%\\aMule for the current user (aMule.conf, ED2K server list, Kad nodes, partfiles, IP filters, friends list). Leave unchecked to keep your settings."

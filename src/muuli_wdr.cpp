@@ -38,6 +38,7 @@
 #include "muuli_wdr.h"
 
 #include <wx/intl.h>
+#include <wx/wrapsizer.h> // Needed for the responsive statistics legends
 
 // Euro sign hack of the year
 #if wxUSE_UNICODE
@@ -91,16 +92,17 @@ wxSizer *muleDlg( wxWindow *parent, bool call_fit, bool set_sizer )
     contentSizer = item1;
 
     item0->Add( item1, wxSizerFlags(1).Expand().CenterVertical() );
-    wxFlexGridSizer *item2 = new wxFlexGridSizer( 3, 0, 0 );
-    item2->AddGrowableCol( 1 );
+    wxFlexGridSizer *item2 = new wxFlexGridSizer( 2, 0, 0 );
+    item2->AddGrowableCol( 0 );
     s_fed2klh = item2;
 
-    wxStaticText *item3 = new wxStaticText( parent, -1, _("eD2k Link: "), wxDefaultPosition, wxDefaultSize, 0 );
-    item2->Add( item3, wxSizerFlags().Center().Border(wxLEFT, 5) );
+    // The old "eD2k Link:" label is gone -- the text control's placeholder
+    // ("Paste eD2k or magnet links here") now conveys the same thing.
     CMuleTextCtrl *item4 = new CMuleTextCtrl( parent, -1, "", wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE );
     item4->SetName( "FastEd2kLinks" );
+    item4->SetPlaceholder( _("Paste eD2k or magnet links here") );
     item2->Add( item4, wxSizerFlags(1).Expand().Border(wxALL, 5) );
-    wxButton *item5 = new wxButton( parent, ID_BUTTON_FAST, _("Commit"), wxDefaultPosition, wxDefaultSize, 0 );
+    wxButton *item5 = new wxButton( parent, ID_BUTTON_FAST, _("Add links"), wxDefaultPosition, wxDefaultSize, 0 );
     item5->SetToolTip( _("Click here to add the eD2k link in the text control to your download queue.") );
     item2->Add( item5, wxSizerFlags().Center().Border(wxRIGHT, 5) );
     item0->Add( item2, wxSizerFlags().Expand().CenterVertical() );
@@ -891,9 +893,9 @@ wxSizer *statsDlg( wxWindow *parent, bool call_fit, bool set_sizer )
 item3->SetName("dloadScope");
     wxASSERT( item3 );
     item1->Add( item3, wxSizerFlags(1).Expand().Border(wxALL, 5) );
-    wxFlexGridSizer *item4 = new wxFlexGridSizer( 2, 0, 0 );
-    item4->AddGrowableCol( 0 );
-    item4->AddGrowableCol( 1 );
+    // Responsive legend: a wrap sizer keeps all three entries on one row
+    // when the graph is wide, and wraps them to 2/1 columns as it narrows.
+    wxWrapSizer *item4 = new wxWrapSizer( wxHORIZONTAL );
 
     wxBoxSizer *item5 = new wxBoxSizer( wxHORIZONTAL );
 
@@ -919,7 +921,7 @@ item3->SetName("dloadScope");
     wxStaticText *item13 = new wxStaticText( parent, -1, _("Session average"), wxDefaultPosition, wxDefaultSize, 0 );
     item11->Add( item13, wxSizerFlags().Center().Border(wxLEFT, 5) );
     item4->Add( item11, wxSizerFlags().CenterVertical().Border(wxLEFT, 5) );
-    item1->Add( item4, wxSizerFlags().CenterVertical().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
+    item1->Add( item4, wxSizerFlags().Expand().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
     item0->Add( item1, wxSizerFlags(1).Expand().Border(wxBOTTOM, 5) );
     wxStaticBox *item15 = new wxStaticBox( parent, -1, _("Upload-Speed") );
     wxStaticBoxSizer *item14 = new wxStaticBoxSizer( item15, wxVERTICAL );
@@ -928,9 +930,7 @@ item3->SetName("dloadScope");
 item16->SetName("uloadScope");
     wxASSERT( item16 );
     item14->Add( item16, wxSizerFlags(1).Expand().Border(wxALL, 5) );
-    wxFlexGridSizer *item17 = new wxFlexGridSizer( 2, 0, 0 );
-    item17->AddGrowableCol( 0 );
-    item17->AddGrowableCol( 1 );
+    wxWrapSizer *item17 = new wxWrapSizer( wxHORIZONTAL );
 
     wxBoxSizer *item18 = new wxBoxSizer( wxHORIZONTAL );
 
@@ -956,7 +956,7 @@ item16->SetName("uloadScope");
     wxStaticText *item26 = new wxStaticText( parent, -1, _("Session average"), wxDefaultPosition, wxDefaultSize, 0 );
     item24->Add( item26, wxSizerFlags().Center().Border(wxLEFT, 5) );
     item17->Add( item24, wxSizerFlags().CenterVertical().Border(wxLEFT, 5) );
-    item14->Add( item17, wxSizerFlags().CenterVertical().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
+    item14->Add( item17, wxSizerFlags().Expand().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
     item0->Add( item14, wxSizerFlags(1).Expand().Border(wxBOTTOM, 5) );
     wxStaticBox *item28 = new wxStaticBox( parent, -1, _("Connections") );
     wxStaticBoxSizer *item27 = new wxStaticBoxSizer( item28, wxVERTICAL );
@@ -965,9 +965,7 @@ item16->SetName("uloadScope");
 item29->SetName("otherScope");
     wxASSERT( item29 );
     item27->Add( item29, wxSizerFlags(1).Expand().Border(wxALL, 5) );
-    wxFlexGridSizer *item30 = new wxFlexGridSizer( 2, 0, 0 );
-    item30->AddGrowableCol( 0 );
-    item30->AddGrowableCol( 1 );
+    wxWrapSizer *item30 = new wxWrapSizer( wxHORIZONTAL );
 
     wxBoxSizer *item31 = new wxBoxSizer( wxHORIZONTAL );
 
@@ -993,7 +991,7 @@ item29->SetName("otherScope");
     wxStaticText *item39 = new wxStaticText( parent, -1, _("Active uploads"), wxDefaultPosition, wxDefaultSize, 0 );
     item37->Add( item39, wxSizerFlags().Center().Border(wxLEFT, 5) );
     item30->Add( item37, wxSizerFlags().CenterVertical().Border(wxLEFT, 5) );
-    item27->Add( item30, wxSizerFlags().CenterVertical().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
+    item27->Add( item30, wxSizerFlags().Expand().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
     item0->Add( item27, wxSizerFlags(1).Expand().Border(wxALL, 5) );
     wxStaticBox *item41 = new wxStaticBox( parent, -1, _("Statistics Tree") );
     wxStaticBoxSizer *item40 = new wxStaticBoxSizer( item41, wxVERTICAL );
@@ -2059,9 +2057,12 @@ wxSizer *preferencesDlgTop( wxWindow *parent, bool call_fit, bool set_sizer )
     wxListCtrl *item2 = new wxListCtrl( parent, ID_PREFSLISTCTRL, wxDefaultPosition, wxDefaultSize, wxLC_REPORT|wxLC_NO_HEADER|wxLC_SINGLE_SEL|wxSUNKEN_BORDER );
     item1->Add( item2, wxSizerFlags().Expand().Border(wxALL, 5) );
     item0->Add( item1, wxSizerFlags(1).Expand().Border(wxALL, 0) );
-    wxStaticBox *item4 = new wxStaticBox( parent, -1, "" );
-    wxStaticBoxSizer *item3 = new wxStaticBoxSizer( item4, wxHORIZONTAL );
+    // Plain button row (no static-box container). A leading stretch spacer
+    // right-aligns the whole group; the page-scoped "Reset" button (hidden
+    // except on the Advanced page, see PrefsUnifiedDlg) sits left of OK/Cancel.
+    wxBoxSizer *item3 = new wxBoxSizer( wxHORIZONTAL );
 
+    item3->AddStretchSpacer( 1 );
     wxButton *item7 = new wxButton( parent, IDC_TWEAKS_RESET, _("Reset page to defaults"), wxDefaultPosition, wxDefaultSize, 0 );
     item7->SetToolTip( _("Reset the settings on the current page to their default values.") );
     item3->Add( item7, wxSizerFlags().Center().Border(wxALL, 5) );
@@ -2072,7 +2073,7 @@ wxSizer *preferencesDlgTop( wxWindow *parent, bool call_fit, bool set_sizer )
     wxButton *item6 = new wxButton( parent, ID_PREFS_CANCEL_TOP, _("Cancel"), wxDefaultPosition, wxDefaultSize, 0 );
     item6->SetToolTip( _("Reset any changes made to the preferences.") );
     item3->Add( item6, wxSizerFlags().Center().Border(wxALL, 5) );
-    item0->Add( item3, wxSizerFlags().CenterHorizontal().Border(wxALL, 5) );
+    item0->Add( item3, wxSizerFlags().Expand().Border(wxALL, 5) );
     if (set_sizer)
     {
         parent->SetSizer( item0 );
@@ -2192,14 +2193,11 @@ wxSizer *ServerInfoLog( wxWindow *parent, bool call_fit, bool set_sizer )
 {
     wxBoxSizer *item0 = new wxBoxSizer( wxVERTICAL );
 
-    wxBoxSizer *item1 = new wxBoxSizer( wxHORIZONTAL );
-
     CMuleTextCtrl *item2 = new CMuleTextCtrl( parent, ID_SERVERINFO, "", wxDefaultPosition, wxSize(200, 100), wxTE_MULTILINE|wxTE_READONLY|wxVSCROLL );
-    item1->Add( item2, wxSizerFlags(1).Expand().CenterHorizontal() );
-    wxButton *item3 = new wxButton( parent, ID_BTN_RESET_SERVER, _("Reset"), wxDefaultPosition, wxDefaultSize, 0 );
+    item0->Add( item2, wxSizerFlags(1).Expand().Border(wxALL, 5) );
+    wxButton *item3 = new wxButton( parent, ID_BTN_RESET_SERVER, _("Clear"), wxDefaultPosition, wxDefaultSize, 0 );
     item3->SetToolTip( _("Click this button to reset the log.") );
-    item1->Add( item3, wxSizerFlags().Expand().CenterHorizontal().Border(wxALL, 5) );
-    item0->Add( item1, wxSizerFlags(1).Expand().CenterVertical() );
+    item0->Add( item3, wxSizerFlags().Right().Border(wxRIGHT|wxBOTTOM, 5) );
     if (set_sizer)
     {
         parent->SetSizer( item0 );
@@ -2214,14 +2212,11 @@ wxSizer *aMuleLog( wxWindow *parent, bool call_fit, bool set_sizer )
 {
     wxBoxSizer *item0 = new wxBoxSizer( wxVERTICAL );
 
-    wxBoxSizer *item1 = new wxBoxSizer( wxHORIZONTAL );
-
     CMuleTextCtrl *item2 = new CMuleTextCtrl( parent, ID_LOGVIEW, "", wxDefaultPosition, wxSize(200, 100), wxTE_MULTILINE|wxTE_READONLY|wxVSCROLL|wxTE_RICH2 );
-    item1->Add( item2, wxSizerFlags(1).Expand().CenterHorizontal() );
-    wxButton *item3 = new wxButton( parent, ID_BTN_RESET, _("Reset"), wxDefaultPosition, wxDefaultSize, 0 );
+    item0->Add( item2, wxSizerFlags(1).Expand().Border(wxALL, 5) );
+    wxButton *item3 = new wxButton( parent, ID_BTN_RESET, _("Clear"), wxDefaultPosition, wxDefaultSize, 0 );
     item3->SetToolTip( _("Click this button to reset the log.") );
-    item1->Add( item3, wxSizerFlags().Expand().CenterHorizontal().Border(wxALL, 5) );
-    item0->Add( item1, wxSizerFlags(1).Expand().CenterVertical() );
+    item0->Add( item3, wxSizerFlags().Right().Border(wxRIGHT|wxBOTTOM, 5) );
     if (set_sizer)
     {
         parent->SetSizer( item0 );
@@ -2357,9 +2352,11 @@ item9->SetName("kadScope");
     wxASSERT( item9 );
     item7->Add( item9, 1, wxGROW, 5 );
 
+    // Three legend entries packed tight at the left. No growable columns:
+    // the row is Expand()ed so Linux has room to draw every label (avoids
+    // clipping "Session average"), but without growable cols the entries
+    // stay next to each other instead of being spread across the width.
     wxFlexGridSizer *item10 = new wxFlexGridSizer( 3, 0, 0 );
-    item10->AddGrowableCol( 0 );
-    item10->AddGrowableCol( 1 );
 
     wxBoxSizer *item11 = new wxBoxSizer( wxHORIZONTAL );
 
@@ -2385,8 +2382,8 @@ item9->SetName("kadScope");
     wxStaticText *item19 = new wxStaticText( parent, -1, _("Session average"), wxDefaultPosition, wxDefaultSize, 0 );
     item17->Add( item19, wxSizerFlags().Center().Border(wxLEFT, 5) );
     item10->Add( item17, wxSizerFlags().CenterVertical().Border(wxLEFT, 5) );
-    item7->Add( item10, wxSizerFlags().Bottom().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
-    item2->Add( item7, wxSizerFlags(1).Expand().CenterVertical() );
+    item7->Add( item10, wxSizerFlags().Expand().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
+    item2->Add( item7, wxSizerFlags(1).Expand() );
     item1->Add( item2, 0, wxGROW, 0 );
 
     wxStaticBox *item21 = new wxStaticBox( parent, -1, _("Bootstrap") );
@@ -2425,16 +2422,17 @@ item9->SetName("kadScope");
     wxButton *item36 = new wxButton( parent, ID_NODECONNECT, _("Connect"), wxDefaultPosition, wxDefaultSize, 0 );
     item36->Enable( false );
     item22->Add( item36, wxSizerFlags().Center().Border(wxTOP|wxBOTTOM, 5) );
-    item20->Add( item22, 0, wxALIGN_RIGHT, 0 );
+    item20->Add( item22, wxSizerFlags().Expand().Border(wxALL, 5) );
 
-    item20->Add( 20, 20, wxSizerFlags().Center().Border(wxALL, 5) );
+    // Bootstrap actions stacked directly under the New node box, with
+    // padding but no filler spacers -- the column is top-aligned so the
+    // graph column beside it takes all the freed vertical space.
     wxButton *item37 = new wxButton( parent, ID_KNOWNNODECONNECT, _("Bootstrap from known clients"), wxDefaultPosition, wxDefaultSize, 0 );
-    item20->Add( item37, wxSizerFlags().Expand().CenterVertical() );
-    item20->Add( 20, 20, wxSizerFlags().Center().Border(wxALL, 5) );
+    item20->Add( item37, wxSizerFlags().Expand().Border(wxLEFT|wxRIGHT|wxTOP, 5) );
     wxButton *item38 = new wxButton( parent, ID_KADDISCONNECT, _("Disconnect Kad"), wxDefaultPosition, wxDefaultSize, 0 );
-    item20->Add( item38, wxSizerFlags().Expand().CenterVertical() );
-    item1->Add( item20, wxSizerFlags().Expand().Right() );
-    item0->Add( item1, wxSizerFlags().Expand().CenterVertical() );
+    item20->Add( item38, wxSizerFlags().Expand().Border(wxALL, 5) );
+    item1->Add( item20, wxSizerFlags().Top() );
+    item0->Add( item1, wxSizerFlags(1).Expand() );
     if (set_sizer)
     {
         parent->SetSizer( item0 );
@@ -3101,13 +3099,20 @@ wxSizer *sharedfilesTopDlg( wxWindow *parent, bool call_fit, bool set_sizer )
     wxStaticText *item2 = new wxStaticText( parent, -1, _("Shared files"), wxDefaultPosition, wxDefaultSize, 0 );
     item2->SetName( "sharedFilesLabel" );
     item1->Add( item2, wxSizerFlags().CenterVertical().Border(wxLEFT, 5) );
-    wxString strs3[] = 
-    {
-        _("All files"), 
-        _("Selected files"), 
-        _("Active uploads only")
-    };
-    wxRadioBox *item3 = new wxRadioBox( parent, ID_SHOW_CLIENTS_MODE, _("Show Clients for"), wxDefaultPosition, wxDefaultSize, 3, strs3, 1, int(wxNO_BORDER)|wxRA_SPECIFY_ROWS );
+    // "Show Clients for" as a label + inline radio buttons. This replaces a
+    // wxRadioBox whose title row wasted vertical space in the header.
+    wxBoxSizer *item3 = new wxBoxSizer( wxHORIZONTAL );
+    wxStaticText *itemShowLabel = new wxStaticText( parent, -1, _("Show Clients for"), wxDefaultPosition, wxDefaultSize, 0 );
+    item3->Add( itemShowLabel, wxSizerFlags().CenterVertical().Border(wxRIGHT, 8) );
+    wxRadioButton *itemShowAll = new wxRadioButton( parent, ID_SHOW_CLIENTS_MODE, _("All files"), wxDefaultPosition, wxDefaultSize, wxRB_GROUP );
+    itemShowAll->SetName( "showClientsAll" );
+    item3->Add( itemShowAll, wxSizerFlags().CenterVertical().Border(wxRIGHT, 8) );
+    wxRadioButton *itemShowSelected = new wxRadioButton( parent, -1, _("Selected files"), wxDefaultPosition, wxDefaultSize, 0 );
+    itemShowSelected->SetName( "showClientsSelected" );
+    item3->Add( itemShowSelected, wxSizerFlags().CenterVertical().Border(wxRIGHT, 8) );
+    wxRadioButton *itemShowUploading = new wxRadioButton( parent, -1, _("Active uploads only"), wxDefaultPosition, wxDefaultSize, 0 );
+    itemShowUploading->SetName( "showClientsUploading" );
+    item3->Add( itemShowUploading, wxSizerFlags().CenterVertical() );
     item1->Add( item3, wxSizerFlags().Center().Border(wxALL, 5) );
     wxStaticText *item4 = new wxStaticText( parent, -1, _("Reload:"), wxDefaultPosition, wxDefaultSize, 0 );
     item4->SetName( "sharedFilesLabel" );

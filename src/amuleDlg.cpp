@@ -91,42 +91,6 @@
 #include "MacAppHelper.h" // mac_set_accessory_mode
 #endif
 
-#ifdef ENABLE_IP2COUNTRY // That's no bug. MSVC has ENABLE_IP2COUNTRY always on,
-			 // but dummy GeoIP.h turns ENABLE_IP2COUNTRY off again.
-void CamuleDlg::IP2CountryDownloadFinished(uint32 result)
-{
-	m_IP2Country->DownloadFinished(result);
-
-	// Refresh the IP2Country status block in the Preferences dialog if
-	// the user happens to have it open right now (e.g. they clicked
-	// "Update now" and have been watching the panel). No-op otherwise.
-	PrefsUnifiedDlg::RefreshIP2CountryStatusIfOpen();
-}
-
-void CamuleDlg::EnableIP2Country()
-{
-	if (thePrefs::IsGeoIPEnabled()) {
-		m_IP2Country->Enable();
-		// Auto-update on startup: refresh the database from the
-		// selected source so the user sees current data without
-		// having to open Preferences and click "Update now". Only
-		// fires when both the master enable AND the per-source
-		// auto-update toggle are on, and a database is already
-		// loaded (the first-run / missing-file path is handled
-		// inside Enable() above via its own Update() call).
-		if (thePrefs::IsGeoIPAutoUpdate() && m_IP2Country->IsEnabled()) {
-			m_IP2Country->Update();
-		}
-	}
-}
-
-#else
-
-void CamuleDlg::IP2CountryDownloadFinished(uint32) {}
-void CamuleDlg::EnableIP2Country() {}
-
-#endif
-
 wxBEGIN_EVENT_TABLE(CamuleDlg, wxFrame)
 
 	EVT_TOOL(ID_BUTTONNETWORKS, CamuleDlg::OnToolBarButton)
@@ -275,8 +239,9 @@ CamuleDlg::CamuleDlg(wxWindow *pParent, const wxString &title, wxPoint where, wx
 	AddLogLineN("");
 
 #ifdef ENABLE_IP2COUNTRY
+	// The GeoIP resolver itself is core-owned (CamuleApp); the dialog only
+	// records that the build supports it, for the prefs panel.
 	m_GeoIPavailable = true;
-	m_IP2Country = new CIP2Country(thePrefs::GetConfigDir());
 #else
 	m_GeoIPavailable = false;
 #endif
@@ -685,10 +650,6 @@ CamuleDlg::~CamuleDlg()
 	m_startupVersionCheck = NULL;
 #endif
 
-#ifdef ENABLE_IP2COUNTRY
-	delete m_IP2Country;
-#endif
-
 	AddLogLineN(_("aMule dialog destroyed"));
 }
 
@@ -758,16 +719,28 @@ void CamuleDlg::AddLogLine(const wxString &line)
 	// Add the message to the log-view
 	wxTextCtrl *ct = CastByID(ID_LOGVIEW, m_serverwnd, wxTextCtrl);
 	if (ct) {
-		// Bold critical log-lines
-		// Works in Windows too thanks to wxTE_RICH2 style in muuli
-		wxTextAttr style = ct->GetDefaultStyle();
-		wxFont font = style.GetFont();
-		font.SetWeight(addtostatusbar ? wxFONTWEIGHT_BOLD : wxFONTWEIGHT_NORMAL);
-		style.SetFont(font);
-		style.SetFontSize(8);
-		ct->SetDefaultStyle(style);
+		// Bold critical log-lines (works on Windows too thanks to the
+		// wxTE_RICH2 style in muuli). SetDefaultStyle() is expensive on the
+		// RichEdit control, so only touch it when the weight actually
+		// changes rather than on every line -- a remote-GUI first-sync
+		// backlog is thousands of lines (issue #445).
+		int critical = addtostatusbar ? 1 : 0;
+		if (critical != m_logLastCritical) {
+			wxTextAttr style = ct->GetDefaultStyle();
+			wxFont font = style.GetFont();
+			font.SetWeight(addtostatusbar ? wxFONTWEIGHT_BOLD : wxFONTWEIGHT_NORMAL);
+			style.SetFont(font);
+			style.SetFontSize(8);
+			ct->SetDefaultStyle(style);
+			m_logLastCritical = critical;
+		}
 		ct->AppendText(bufferline);
-		ct->ShowPosition(ct->GetLastPosition() - 1);
+		// During a batch (BeginLogBatch/EndLogBatch) the caller scrolls once
+		// at the end; a per-line ShowPosition on a large backlog forces an
+		// O(n) RichEdit reflow on every line.
+		if (!m_logBatching) {
+			ct->ShowPosition(ct->GetLastPosition() - 1);
+		}
 	}
 
 	// Set the status-bar if the event warrents it
@@ -779,6 +752,31 @@ void CamuleDlg::AddLogLine(const wxString &line)
 		text->SetLabel(bufferline.BeforeFirst('\n'));
 		text->SetToolTip(bufferline);
 		text->GetParent()->Layout();
+	}
+}
+
+void CamuleDlg::BeginLogBatch()
+{
+	// Coalesce a poll's worth of log lines into a single scroll-to-end
+	// (EndLogBatch) instead of one per line, which forced an O(n) RichEdit
+	// reflow on every line of a first-sync backlog (issue #445).
+	//
+	// Deliberately NO Freeze()/Thaw() here: appending to a *frozen*
+	// wxTE_RICH2 control on Windows leaves its line/scroll metrics stale, so
+	// after Thaw the view renders blank with the newest line pinned to the top
+	// until a manual scroll forces a recompute. That's the regression #451
+	// introduced and #471's Thaw-before-scroll tweak didn't cure (the append
+	// itself happened while frozen). Appending live keeps the metrics correct;
+	// suppressing only the per-line ShowPosition still removes the reflow cost.
+	m_logBatching = true;
+}
+
+void CamuleDlg::EndLogBatch()
+{
+	m_logBatching = false;
+	wxTextCtrl *ct = CastByID(ID_LOGVIEW, m_serverwnd, wxTextCtrl);
+	if (ct) {
+		ct->ShowPosition(ct->GetLastPosition() - 1);
 	}
 }
 

@@ -114,7 +114,28 @@ std::string ToJsonDownloadEvent(const FileSnapshot &f)
 	  << ",\"transferring\":" << f.download.sources_transferring
 	  << ",\"a4af\":" << f.download.sources_a4af << "}"
 	  << ",\"progress\":{\"percent\":" << f.download.percent << "}"
-	  << "}";
+	  << ",\"kad_search_running\":" << (f.download.kad_comment_searching ? "true" : "false") << "}";
+	return o.str();
+}
+
+// comments_updated event payload — the file's full comment/rating list, matching
+// the GET /downloads/{hash}/comments body. Covers both retrieved Kad notes and
+// comments reported by connected ed2k sources (they share source_comments).
+std::string ToJsonCommentsEvent(const FileSnapshot &f)
+{
+	std::ostringstream o;
+	o << "{\"hash\":\"" << EscJson(f.hash) << "\""
+	  << ",\"count\":" << f.download.source_comments.size() << ",\"comments\":[";
+	bool first = true;
+	for (const auto &c : f.download.source_comments) {
+		if (!first)
+			o << ",";
+		first = false;
+		o << "{\"username\":\"" << EscJson(c.username) << "\""
+		  << ",\"filename\":\"" << EscJson(c.filename) << "\""
+		  << ",\"rating\":" << c.rating << ",\"comment\":\"" << EscJson(c.comment) << "\"}";
+	}
+	o << "]}";
 	return o.str();
 }
 
@@ -135,7 +156,9 @@ std::string ToJsonSharedEvent(const FileSnapshot &f)
 	  << ",\"total\":" << f.shared.requests_total << "}"
 	  << ",\"accepts\":{\"session\":" << f.shared.accepts_session
 	  << ",\"total\":" << f.shared.accepts_total << "}"
-	  << "}";
+	  << ",\"upload_speed_bps\":" << f.shared.upload_speed_bps
+	  << ",\"uploading\":" << f.shared.uploading_count << ",\"last_upload\":" << f.shared.last_upload
+	  << ",\"shared_since\":" << f.shared.shared_since << "}";
 	return o.str();
 }
 
@@ -147,6 +170,7 @@ std::string ToJson(const ServerSnapshot &s)
 	  << ",\"description\":\"" << EscJson(s.description) << "\""
 	  << ",\"version\":\"" << EscJson(s.version) << "\""
 	  << ",\"address\":\"" << EscJson(s.address) << "\""
+	  << ",\"country_code\":\"" << EscJson(s.country_code) << "\""
 	  << ",\"port\":" << s.port << ",\"users\":" << s.users << ",\"max_users\":" << s.max_users
 	  << ",\"files\":" << s.files << ",\"priority\":\"" << EscJson(s.priority) << "\""
 	  << ",\"ping_ms\":" << s.ping_ms << ",\"failed\":" << s.failed
@@ -161,6 +185,7 @@ std::string ToJson(const ClientSnapshot &c)
 	  << "\"client_ecid\":" << c.ecid << ",\"client_name\":\"" << EscJson(c.client_name) << "\""
 	  << ",\"user_hash\":\"" << EscJson(c.user_hash) << "\""
 	  << ",\"ip\":\"" << EscJson(c.ip) << "\""
+	  << ",\"country_code\":\"" << EscJson(c.country_code) << "\""
 	  << ",\"port\":" << c.port << ",\"software\":\"" << EscJson(c.software) << "\""
 	  << ",\"software_version\":\"" << EscJson(c.software_version) << "\""
 	  << ",\"os_info\":\"" << EscJson(c.os_info) << "\""
@@ -241,7 +266,25 @@ bool EqualDownload(const FileSnapshot &a, const FileSnapshot &b)
 	       a.download.sources_total == b.download.sources_total &&
 	       a.download.sources_not_current == b.download.sources_not_current &&
 	       a.download.sources_transferring == b.download.sources_transferring &&
-	       a.download.sources_a4af == b.download.sources_a4af && a.download.percent == b.download.percent;
+	       a.download.sources_a4af == b.download.sources_a4af &&
+	       a.download.percent == b.download.percent &&
+	       a.download.kad_comment_searching == b.download.kad_comment_searching;
+}
+
+// Comment list equality (deliberately NOT part of EqualDownload — a comment
+// change drives the separate comments_updated event, not download_updated).
+bool EqualComments(const FileSnapshot &a, const FileSnapshot &b)
+{
+	const auto &ca = a.download.source_comments;
+	const auto &cb = b.download.source_comments;
+	if (ca.size() != cb.size())
+		return false;
+	for (std::size_t i = 0; i < ca.size(); ++i) {
+		if (ca[i].username != cb[i].username || ca[i].filename != cb[i].filename ||
+			ca[i].rating != cb[i].rating || ca[i].comment != cb[i].comment)
+			return false;
+	}
+	return true;
 }
 bool EqualShared(const FileSnapshot &a, const FileSnapshot &b)
 {
@@ -253,26 +296,30 @@ bool EqualShared(const FileSnapshot &a, const FileSnapshot &b)
 	       a.shared.requests_session == b.shared.requests_session &&
 	       a.shared.requests_total == b.shared.requests_total &&
 	       a.shared.accepts_session == b.shared.accepts_session &&
-	       a.shared.accepts_total == b.shared.accepts_total;
+	       a.shared.accepts_total == b.shared.accepts_total &&
+	       a.shared.upload_speed_bps == b.shared.upload_speed_bps &&
+	       a.shared.uploading_count == b.shared.uploading_count &&
+	       a.shared.last_upload == b.shared.last_upload && a.shared.shared_since == b.shared.shared_since;
 }
 bool Equal(const ServerSnapshot &a, const ServerSnapshot &b)
 {
 	return a.name == b.name && a.description == b.description && a.version == b.version &&
-	       a.address == b.address && a.port == b.port && a.users == b.users &&
-	       a.max_users == b.max_users && a.files == b.files && a.priority == b.priority &&
-	       a.ping_ms == b.ping_ms && a.failed == b.failed && a.is_static == b.is_static;
+	       a.address == b.address && a.country_code == b.country_code && a.port == b.port &&
+	       a.users == b.users && a.max_users == b.max_users && a.files == b.files &&
+	       a.priority == b.priority && a.ping_ms == b.ping_ms && a.failed == b.failed &&
+	       a.is_static == b.is_static;
 }
 bool Equal(const ClientSnapshot &a, const ClientSnapshot &b)
 {
 	return a.client_name == b.client_name && a.user_hash == b.user_hash && a.ip == b.ip &&
-	       a.port == b.port && a.software == b.software && a.software_version == b.software_version &&
-	       a.os_info == b.os_info && a.upload_state == b.upload_state &&
-	       a.download_state == b.download_state && a.ident_state == b.ident_state &&
-	       a.download_file_name == b.download_file_name && a.upload_file_hash == b.upload_file_hash &&
-	       a.download_file_hash == b.download_file_hash && a.xfer_up_session == b.xfer_up_session &&
-	       a.xfer_down_session == b.xfer_down_session && a.xfer_up_total == b.xfer_up_total &&
-	       a.xfer_down_total == b.xfer_down_total && a.upload_speed_bps == b.upload_speed_bps &&
-	       a.download_speed_bps == b.download_speed_bps &&
+	       a.country_code == b.country_code && a.port == b.port && a.software == b.software &&
+	       a.software_version == b.software_version && a.os_info == b.os_info &&
+	       a.upload_state == b.upload_state && a.download_state == b.download_state &&
+	       a.ident_state == b.ident_state && a.download_file_name == b.download_file_name &&
+	       a.upload_file_hash == b.upload_file_hash && a.download_file_hash == b.download_file_hash &&
+	       a.xfer_up_session == b.xfer_up_session && a.xfer_down_session == b.xfer_down_session &&
+	       a.xfer_up_total == b.xfer_up_total && a.xfer_down_total == b.xfer_down_total &&
+	       a.upload_speed_bps == b.upload_speed_bps && a.download_speed_bps == b.download_speed_bps &&
 	       a.queue_waiting_position == b.queue_waiting_position &&
 	       a.remote_queue_rank == b.remote_queue_rank && a.score == b.score &&
 	       a.obfuscation_status == b.obfuscation_status && a.friend_slot == b.friend_slot;
@@ -460,8 +507,18 @@ void EmitDiffsAndUpdate(CEventBus &bus, LastSeenState &prev, const CState &state
 			if (kv.second.is_downloading) {
 				if (!was_downloading) {
 					push("download_added", ToJsonDownloadEvent(kv.second));
-				} else if (!EqualDownload(it->second, kv.second)) {
-					push("download_updated", ToJsonDownloadEvent(kv.second));
+					if (!kv.second.download.source_comments.empty()) {
+						push("comments_updated", ToJsonCommentsEvent(kv.second));
+					}
+				} else {
+					if (!EqualDownload(it->second, kv.second)) {
+						push("download_updated", ToJsonDownloadEvent(kv.second));
+					}
+					// Independent of download_updated: fires for Kad notes AND
+					// comments reported by connected sources (issue #434 / #419).
+					if (!EqualComments(it->second, kv.second)) {
+						push("comments_updated", ToJsonCommentsEvent(kv.second));
+					}
 				}
 			}
 			if (kv.second.is_shared) {
@@ -538,8 +595,39 @@ void EmitDiffsAndUpdate(CEventBus &bus, LastSeenState &prev, const CState &state
 						<< (kv.second.already_have ? "true" : "false")
 						<< ",\"rating\":" << static_cast<int>(kv.second.rating)
 						<< ",\"status\":\"" << EscJson(kv.second.status) << "\""
-						<< ",\"type\":\"" << EscJson(kv.second.type) << "\""
-						<< "}";
+						<< ",\"type\":\"" << EscJson(kv.second.type) << "\"";
+					// Media metadata (issue #430) — same shape as
+					// WriteSearchObject; omitted when the hit has none.
+					if (kv.second.has_media) {
+						const auto &m = kv.second.media;
+						payload << ",\"media\":{\"length_s\":" << m.length_s
+							<< ",\"bitrate\":" << m.bitrate << ",\"codec\":\""
+							<< EscJson(m.codec) << "\",\"artist\":\""
+							<< EscJson(m.artist) << "\",\"album\":\""
+							<< EscJson(m.album) << "\",\"title\":\""
+							<< EscJson(m.title) << "\"}";
+					}
+					// Result grouping (issue #431) — same shape as
+					// WriteSearchObject's children[]; always present
+					// (empty array when the hit had a single name).
+					payload << ",\"children\":[";
+					{
+						bool first = true;
+						for (const auto &c : kv.second.children) {
+							if (!first)
+								payload << ",";
+							first = false;
+							payload << "{\"ecid\":" << c.ecid << ",\"name\":\""
+								<< EscJson(c.name) << "\",\"hash\":\""
+								<< EscJson(c.hash)
+								<< "\",\"sources\":{\"total\":"
+								<< c.source_count
+								<< ",\"complete\":" << c.complete_source_count
+								<< "}}";
+						}
+					}
+					payload << "]";
+					payload << "}";
 					bus.Publish("search_result_added", payload.str());
 				}
 			}

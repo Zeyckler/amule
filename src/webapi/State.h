@@ -112,11 +112,18 @@ struct FileSnapshot
 		std::string title;
 	} media;
 
-	// EC_TAG_KNOWNFILE_FILENAME: a partfile's on-disk basename (e.g.
-	// `001.part`), or a completed known file's directory path.
-	// Interpreted per endpoint — `met_file` on /downloads/{hash},
-	// `path` on /shared/{hash}.
-	std::string knownfile_filename;
+	// The partfile's control-file basename (e.g. `001.part`), from
+	// EC_TAG_KNOWNFILE_FILENAME. Meaningful only while the file is still
+	// an incomplete partfile — once it completes, the daemon reuses that
+	// EC tag to carry the directory path, so `met_file` on /downloads is
+	// gated on the download status (empty once completed). See #417.
+	std::string part_met_basename;
+
+	// The file's on-disk directory, from EC_TAG_KNOWNFILE_PATH — the Temp
+	// dir while downloading, the destination dir once completed. Always a
+	// directory (never the `.part` basename), so it feeds an unambiguous
+	// `path` on both /downloads/{hash} and /shared/{hash} (#417).
+	std::string on_disk_dir;
 
 	// Download-side state — meaningful when `is_downloading` is true,
 	// reset to default on the true→false transition (and never read
@@ -163,6 +170,11 @@ struct FileSnapshot
 			std::string comment;
 		};
 		std::vector<SourceComment> source_comments;
+
+		// True while an on-demand Kad notes lookup is in flight on amuled for
+		// this file (POST /downloads/{hash}/comments starts one; issue #434).
+		// Lets clients poll GET .../comments until the search finishes.
+		bool kad_comment_searching = false;
 
 		// Source-reported filenames (GET /downloads/{hash}/filenames,
 		// issue #420). amuled delta-encodes these keyed by a stable id
@@ -219,6 +231,16 @@ struct FileSnapshot
 		// `complete_sources` above stays as-is.
 		std::uint16_t complete_sources_low = 0;
 		std::uint16_t complete_sources_high = 0;
+
+		// Live upload activity (issue #466), the upload-side analogue of
+		// the download stats. `upload_speed_bps` + `uploading_count` are
+		// live (refresh every tick); `last_upload` / `shared_since` are
+		// unix timestamps, 0 = unknown (a file that has never uploaded, or
+		// a known.met entry that predates the feature).
+		std::uint32_t upload_speed_bps = 0;
+		std::uint16_t uploading_count = 0;
+		std::uint32_t last_upload = 0;
+		std::uint32_t shared_since = 0;
 	} shared;
 };
 
@@ -242,6 +264,10 @@ struct ClientSnapshot
 	std::string user_hash; // peer's user hash (32-char lowercase hex MD4)
 	std::string ip;        // dotted-quad
 	std::uint16_t port = 0;
+	// ISO 3166-1 alpha-2 country code (lowercase), resolved by the daemon's
+	// GeoIP from the peer IP (#439). "" when GeoIP is disabled/unsupported or
+	// the IP does not resolve.
+	std::string country_code;
 
 	// Software identity. EC_TAG_CLIENT_SOFTWARE ships a numeric code
 	// (SO_AMULE / SO_EMULE / etc); we decode it server-side into a
@@ -293,6 +319,32 @@ struct ClientSnapshot
 	std::uint32_t score = 0;        // EC_TAG_CLIENT_SCORE
 	std::string obfuscation_status; // "none" | "supported" | "required"
 	bool friend_slot = false;
+
+	// --- Detail-only fields (issue #422) -----------------------------
+	// Captured from EC tags already on the INC_UPDATE wire but not
+	// surfaced by the /clients list. Serialized only by the
+	// GET /clients/{ecid} detail endpoint; the list object and the SSE
+	// client_* payloads are unchanged.
+	std::uint32_t user_id_hybrid = 0; // EC_TAG_CLIENT_USER_ID (hybrid eD2k id)
+	bool high_id = false;             // derived: !IsLowID(user_id_hybrid)
+	std::string server_ip;            // dotted-quad; "" when unknown/0
+	std::uint16_t server_port = 0;
+	std::string server_name;
+	std::uint16_t kad_port = 0;        // 0 => Kad not connected for this peer
+	std::string source_origin;         // "server" | "kad" | "source_exchange" | "passive" | "link" | ...
+	std::string upload_file_name;      // partfile this peer downloads FROM us; "" unless uploading
+	std::uint32_t available_parts = 0; // count of parts the peer has (EC_TAG_CLIENT_AVAILABLE_PARTS)
+	bool has_available_parts = false;  // false => tag absent, omit the field
+	std::string mod_version;           // EC_TAG_CLIENT_MOD_VERSION
+	bool view_shared_disabled = false; // peer forbids viewing its shared files
+	// Completeness of the linked download for this peer, as a percent
+	// (available_parts / file part count). < 0 => not computable (no
+	// linked file / no part count); populated by the detail handler.
+	double part_progress_percent = -1.0;
+
+	// --- Detail-only fields (issue #423, new EC tags) ----------------
+	bool is_friend = false;      // CUpDownClient::IsFriend(); distinct from friend_slot
+	double dl_up_modifier = 0.0; // CUpDownClient::GetScoreRatio() ("DL/UP modifier")
 };
 
 // One per eD2k server in the configured server list. Identity is
@@ -309,6 +361,9 @@ struct ServerSnapshot
 	std::string address;  // host:port form (canonical)
 	std::uint32_t ip = 0; // host-byte-order IPv4
 	std::uint16_t port = 0;
+	// ISO 3166-1 alpha-2 country code (lowercase) of the server host,
+	// resolved by the daemon's GeoIP (#440). "" when GeoIP is off/unresolved.
+	std::string country_code;
 	std::uint32_t ping_ms = 0;
 	std::uint32_t failed = 0;
 	std::uint32_t users = 0;
@@ -468,6 +523,37 @@ struct SearchResult
 	// File-type token derived from the filename (like the shared-detail
 	// `file_type`), e.g. "video"/"audio"; "" if the name has no extension.
 	std::string type;
+	// Audio/video media metadata (issue #430), same shape as the file
+	// detail endpoints' `media` object. `has_media` gates it — omitted
+	// when the hit carries no FT_MEDIA_* tags (most remote results).
+	bool has_media = false;
+	struct Media
+	{
+		std::uint32_t length_s = 0;
+		std::uint32_t bitrate = 0;
+		std::string codec;
+		std::string artist;
+		std::string album;
+		std::string title;
+	} media;
+
+	// Result grouping (issue #431): same-hash/same-size hits advertised
+	// under different filenames. `parent_ecid`/`has_parent` are set on a
+	// child during decode; the refresher then folds children into their
+	// parent's `children` list and drops them from the top-level set, so
+	// the API emits one parent row per hash+size with the alternative
+	// names nested. `children` is empty for a hit seen under one name.
+	std::uint32_t parent_ecid = 0;
+	bool has_parent = false;
+	struct Child
+	{
+		std::uint32_t ecid = 0;
+		std::string name;
+		std::string hash; // same as the parent's (that's why they group)
+		std::uint32_t source_count = 0;
+		std::uint32_t complete_source_count = 0;
+	};
+	std::vector<Child> children;
 };
 
 // Refresher-tracked lifecycle of the currently-active (or last-finished)
@@ -554,6 +640,181 @@ struct PreferencesSnapshot
 	bool reconnect = false;
 	bool network_ed2k = false;
 	bool network_kad = false;
+	// Bind the daemon's listening sockets to this local IP (empty = any).
+	// Applied on next daemon start, same as the desktop control.
+	std::string bind_address;
+	// Bind to a named network interface (empty = any); daemon-side name.
+	std::string bind_interface;
+	// Proxy the daemon routes P2P + HTTP through. proxy_password is
+	// write-only (accepted on PATCH, never surfaced here / on GET).
+	bool proxy_enabled = false;
+	std::int32_t proxy_type = -1; // 0 SOCKS5, 1 SOCKS4, 2 HTTP, 3 SOCKS4a
+	std::string proxy_host;
+	std::uint16_t proxy_port = 0;
+	bool proxy_auth = false;
+	std::string proxy_user;
+	// UPnP. upnp_enabled toggles router forwarding of the P2P ports (which
+	// are tcp_port / udp_port themselves); upnp_tcp_port is the UPnP control
+	// point's own local port (0 = auto), not a forwarded port. upnp_available
+	// is a read-only capability: the daemon advertises whether it was built
+	// with UPnP (false on a core built -DENABLE_UPNP=OFF).
+	bool upnp_available = false;
+	bool upnp_enabled = false;
+	std::uint16_t upnp_tcp_port = 0;
+
+	// --- Extended EC-carried categories (issue #437) -----------------
+	// Every field below maps 1:1 to an EC tag the daemon already
+	// serializes in CEC_Prefs_Packet and applies in Apply(); the webapi
+	// just requests the wider selection bitmask and plumbs them through.
+	// Nested sub-structs mirror the nested JSON the endpoint emits.
+
+	// [Directories] EC_TAG_PREFS_DIRECTORIES
+	struct DirectoriesPrefs
+	{
+		std::string incoming;
+		std::string temp;
+		std::vector<std::string> shared;
+		bool share_hidden = false;
+		bool auto_rescan = false;
+		bool follow_symlinks = false;
+		std::string exclude_patterns;
+		bool exclude_regex = false;
+	} directories;
+
+	// [Files] EC_TAG_PREFS_FILES
+	struct FilesPrefs
+	{
+		bool ich_enabled = false;
+		bool aich_trust = false;
+		bool new_paused = false;
+		bool new_auto_dl_prio = false;
+		bool new_auto_ul_prio = false;
+		bool preview_prio = false;
+		bool start_next_paused = false;
+		bool resume_same_cat = false;
+		bool save_sources = false;
+		bool extract_metadata = false;
+		bool alloc_full_size = false;
+		bool check_free_space = false;
+		std::uint32_t min_free_space_mb = 0;
+		bool create_normal = false;
+		bool start_next_alphabetical = false;
+		// Media metadata (issue #140): probe shared files with ffprobe to
+		// advertise length/bitrate/codec. Empty path = daemon auto-detect.
+		bool media_metadata_enabled = false;
+		std::string ffprobe_path;
+	} files;
+
+	// [Servers] EC_TAG_PREFS_SERVERS
+	struct ServersPrefs
+	{
+		bool remove_dead = false;
+		std::uint32_t dead_server_retries = 0;
+		bool auto_update = false;
+		bool add_from_server = false;
+		bool add_from_client = false;
+		bool use_score_system = false;
+		bool smart_id_check = false;
+		bool safe_server_connect = false;
+		bool autoconn_static_only = false;
+		bool manual_high_prio = false;
+		std::string update_url;
+	} servers;
+
+	// [Security] EC_TAG_PREFS_SECURITY
+	struct SecurityPrefs
+	{
+		bool can_see_shares = false;
+		bool ipfilter_clients = false;
+		bool ipfilter_servers = false;
+		bool ipfilter_auto_update = false;
+		std::string ipfilter_update_url;
+		std::uint32_t ipfilter_level = 0;
+		bool ipfilter_filter_lan = false;
+		bool use_secident = false;
+		bool obfuscation_supported = false;
+		bool obfuscation_requested = false;
+		bool obfuscation_required = false;
+		bool paranoid_filtering = false;
+		bool use_system_ipfilter = false;
+	} security;
+
+	// [MessageFilter] EC_TAG_PREFS_MESSAGEFILTER
+	struct MessageFilterPrefs
+	{
+		bool enabled = false;
+		bool all = false;
+		bool friends = false;
+		bool secure = false;
+		bool by_keyword = false;
+		std::string keywords;
+	} message_filter;
+
+	// [RemoteControls] EC_TAG_PREFS_REMOTECTRL. Passwords are
+	// write-only (set via PATCH, never serialized here).
+	struct RemoteControlsPrefs
+	{
+		bool webserver_enabled = false;
+		std::uint32_t webserver_port = 0;
+		bool webserver_use_gzip = false;
+		std::uint32_t webserver_refresh = 0;
+		std::string webserver_template;
+		bool webserver_guest_enabled = false;
+		bool amuleapi_enabled = false;
+		std::uint32_t amuleapi_port = 0;
+		std::string amuleapi_bind;
+	} remote_controls;
+
+	// [OnlineSignature] EC_TAG_PREFS_ONLINESIG
+	struct OnlineSignaturePrefs
+	{
+		bool enabled = false;
+		std::string directory;
+		std::uint32_t update_frequency = 0;
+	} online_signature;
+
+	// [CoreTweaks] EC_TAG_PREFS_CORETWEAKS
+	struct CoreTweaksPrefs
+	{
+		std::uint32_t max_conn_per_five = 0;
+		bool verbose = false;
+		std::uint32_t filebuffer = 0;
+		std::uint32_t ul_queue = 0;
+		std::uint32_t srv_keepalive_timeout = 0;
+		std::uint32_t kad_max_searches = 0;
+		std::uint32_t kad_reask_ms = 0;
+		std::uint32_t source_reask_ms = 0;
+	} core_tweaks;
+
+	// [Kademlia] EC_TAG_PREFS_KADEMLIA
+	struct KademliaPrefs
+	{
+		std::string update_url;
+	} kademlia;
+
+	// [IP2Country] EC_TAG_PREFS_IP2COUNTRY (#440). The daemon only emits
+	// this category on a GeoIP-capable build, so an absent category leaves
+	// `supported` false (mirrors version_check_available: a capability the
+	// connected daemon advertises, not a stored setting). `source` is the
+	// serialized enum "dbip" / "maxmind" / "custom" (next-download
+	// selector). The trailing status fields are read-only daemon state.
+	// `maxmind_license` round-trips plainly — it is a config string the
+	// core already serializes and the desktop GeoIP panel shows, not a
+	// masked password like the [RemoteControls] ones.
+	struct Ip2CountryPrefs
+	{
+		bool supported = false;
+		bool enabled = false;
+		std::string source; // "dbip" / "maxmind" / "custom"
+		std::string custom_url;
+		std::string maxmind_license;
+		bool auto_update = false;
+		std::string loaded_source;
+		std::string db_path;
+		bool db_loaded = false;
+		bool downloading = false;
+		std::string last_result;
+	} ip2country;
 };
 
 struct StatusSnapshot

@@ -495,7 +495,8 @@ TEST(Refresher, DownloadDetailTagsDecodeIntoSnapshot)
 	// Base CKnownFile tags carried on the partfile tag too.
 	pf.AddTag(CECTag(EC_TAG_KNOWNFILE_ON_QUEUE, static_cast<std::uint32_t>(5)));
 	pf.AddTag(CECTag(EC_TAG_KNOWNFILE_AICH_MASTERHASH, std::string("ABCDEF0123")));
-	pf.AddTag(CECTag(EC_TAG_KNOWNFILE_FILENAME, std::string("042.part.met")));
+	pf.AddTag(CECTag(EC_TAG_KNOWNFILE_FILENAME, std::string("042.part")));
+	pf.AddTag(CECTag(EC_TAG_KNOWNFILE_PATH, std::string("/home/me/.aMule/Temp")));
 	resp.AddTag(pf);
 
 	ApplyGetUpdateToDownloads(&resp, cache, rle_state);
@@ -514,7 +515,8 @@ TEST(Refresher, DownloadDetailTagsDecodeIntoSnapshot)
 	ASSERT_EQUALS(static_cast<std::uint32_t>(42), d.download.partmet_id);
 	ASSERT_EQUALS(static_cast<std::uint32_t>(5), d.queued_count);
 	ASSERT_EQUALS(std::string("ABCDEF0123"), d.aich_hash);
-	ASSERT_EQUALS(std::string("042.part.met"), d.knownfile_filename);
+	ASSERT_EQUALS(std::string("042.part"), d.part_met_basename);
+	ASSERT_EQUALS(std::string("/home/me/.aMule/Temp"), d.on_disk_dir);
 }
 
 TEST(Refresher, SharedDetailTagsDecodeIntoSnapshot)
@@ -527,7 +529,13 @@ TEST(Refresher, SharedDetailTagsDecodeIntoSnapshot)
 	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_COMPLETE_SOURCES_HIGH, static_cast<std::uint16_t>(11)));
 	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_ON_QUEUE, static_cast<std::uint32_t>(9)));
 	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_AICH_MASTERHASH, std::string("FEDCBA9876")));
-	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_FILENAME, std::string("/home/kizar/Incoming")));
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_FILENAME, std::string("/home/me/Incoming")));
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_PATH, std::string("/home/me/Incoming")));
+	// Live upload activity (issue #466).
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_UPLOAD_SPEED, static_cast<std::uint32_t>(51200)));
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_UPLOADING_COUNT, static_cast<std::uint16_t>(3)));
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_LAST_UPLOAD, static_cast<std::uint32_t>(1700000500)));
+	kf.AddTag(CECTag(EC_TAG_KNOWNFILE_SHARED_SINCE, static_cast<std::uint32_t>(1699000000)));
 	resp.AddTag(kf);
 
 	ApplyGetUpdateToShared(&resp, cache);
@@ -539,9 +547,14 @@ TEST(Refresher, SharedDetailTagsDecodeIntoSnapshot)
 	ASSERT_EQUALS(static_cast<std::uint16_t>(11), s.shared.complete_sources_high);
 	ASSERT_EQUALS(static_cast<std::uint32_t>(9), s.queued_count);
 	ASSERT_EQUALS(std::string("FEDCBA9876"), s.aich_hash);
-	// Completed known file → the tag is the directory path (the write
-	// layer maps a shared partfile to "[PartFile]" instead).
-	ASSERT_EQUALS(std::string("/home/kizar/Incoming"), s.knownfile_filename);
+	// Completed known file → the directory path arrives on its own tag
+	// (the write layer maps an incomplete shared partfile to "[PartFile]").
+	ASSERT_EQUALS(std::string("/home/me/Incoming"), s.on_disk_dir);
+	// Upload activity (issue #466) decodes into the shared sub-block.
+	ASSERT_EQUALS(static_cast<std::uint32_t>(51200), s.shared.upload_speed_bps);
+	ASSERT_EQUALS(static_cast<std::uint16_t>(3), s.shared.uploading_count);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(1700000500), s.shared.last_upload);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(1699000000), s.shared.shared_since);
 }
 
 // Comment/rating (issue #419): the user's own comment+rating land at the
@@ -729,6 +742,8 @@ TEST(Refresher, ServersFromContainerMergesByEcid)
 		// the snapshot.
 		CECTag srv(EC_TAG_SERVER, static_cast<std::uint32_t>(42));
 		srv.AddTag(CECTag(EC_TAG_SERVER_USERS, static_cast<std::uint32_t>(1234)));
+		// #440 server host country ISO code resolved daemon-side.
+		srv.AddTag(CECTag(EC_TAG_SERVER_COUNTRY, wxString::FromUTF8("de")));
 		container.AddTag(srv);
 		resp.AddTag(container);
 	}
@@ -739,6 +754,7 @@ TEST(Refresher, ServersFromContainerMergesByEcid)
 	ASSERT_TRUE(cache.find(42) != cache.end());
 	ASSERT_TRUE(cache.find(9999) == cache.end()); // evicted
 	ASSERT_EQUALS(static_cast<std::uint32_t>(1234), cache[42].users);
+	ASSERT_EQUALS(std::string("de"), cache[42].country_code);
 }
 
 TEST(Refresher, ServersEmptyContainerEmptiesCache)
@@ -1105,6 +1121,85 @@ TEST(Refresher, SearchProgressIdleZeroesOutGracefully)
 	ASSERT_EQUALS(static_cast<uint32_t>(0), s.percent);
 }
 
+// Search result media metadata (issue #430): the EC_TAG_KNOWNFILE_MEDIA_*
+// tags (present only for hits known/probed locally) decode into the
+// SearchResult media sub-struct and set has_media; a hit with none stays
+// has_media=false so the API omits the `media` object.
+TEST(Refresher, SearchResultMediaDecode)
+{
+	std::map<std::uint32_t, SearchResult> cache;
+	CECPacket resp(EC_OP_SEARCH_RESULTS);
+	CECTag sf(EC_TAG_SEARCHFILE, static_cast<std::uint32_t>(80));
+	sf.AddTag(CECTag(EC_TAG_PARTFILE_NAME, std::string("show.s01e01.mkv")));
+	sf.AddTag(CECTag(EC_TAG_PARTFILE_SIZE_FULL, static_cast<std::uint64_t>(999)));
+	sf.AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_LENGTH, static_cast<std::uint32_t>(1320)));
+	sf.AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_BITRATE, static_cast<std::uint32_t>(2500)));
+	sf.AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_CODEC, std::string("h264")));
+	resp.AddTag(sf);
+	// A second hit with no media tags stays has_media=false.
+	CECTag sf2(EC_TAG_SEARCHFILE, static_cast<std::uint32_t>(81));
+	sf2.AddTag(CECTag(EC_TAG_PARTFILE_NAME, std::string("nomedia.bin")));
+	sf2.AddTag(CECTag(EC_TAG_PARTFILE_SIZE_FULL, static_cast<std::uint64_t>(4)));
+	resp.AddTag(sf2);
+
+	ApplySearchFull(&resp, cache);
+
+	const auto it = cache.find(80);
+	ASSERT_TRUE(it != cache.end());
+	ASSERT_TRUE(it->second.has_media);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(1320), it->second.media.length_s);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(2500), it->second.media.bitrate);
+	ASSERT_EQUALS(std::string("h264"), it->second.media.codec);
+
+	const auto it2 = cache.find(81);
+	ASSERT_TRUE(it2 != cache.end());
+	ASSERT_TRUE(!it2->second.has_media);
+}
+
+// --- #431: result grouping folds same-hash/diff-name children --------
+//
+// A parent plus two children (each carrying EC_TAG_SEARCH_PARENT) must
+// collapse to a single top-level result with the two alternative names
+// nested in children[]; the child ECIDs must not remain top-level.
+TEST(Refresher, SearchResultGroupingFoldsChildren)
+{
+	std::map<std::uint32_t, SearchResult> cache;
+	CECPacket resp(EC_OP_SEARCH_RESULTS);
+
+	CECTag parent(EC_TAG_SEARCHFILE, static_cast<std::uint32_t>(100));
+	parent.AddTag(CECTag(EC_TAG_PARTFILE_NAME, std::string("best.mkv")));
+	parent.AddTag(CECTag(EC_TAG_PARTFILE_SIZE_FULL, static_cast<std::uint64_t>(123)));
+	parent.AddTag(CECTag(EC_TAG_PARTFILE_SOURCE_COUNT, static_cast<std::uint32_t>(30)));
+	resp.AddTag(parent);
+
+	CECTag c1(EC_TAG_SEARCHFILE, static_cast<std::uint32_t>(101));
+	c1.AddTag(CECTag(EC_TAG_PARTFILE_NAME, std::string("alt.name.mkv")));
+	c1.AddTag(CECTag(EC_TAG_PARTFILE_SIZE_FULL, static_cast<std::uint64_t>(123)));
+	c1.AddTag(CECTag(EC_TAG_PARTFILE_SOURCE_COUNT, static_cast<std::uint32_t>(10)));
+	c1.AddTag(CECTag(EC_TAG_SEARCH_PARENT, static_cast<std::uint32_t>(100)));
+	resp.AddTag(c1);
+
+	CECTag c2(EC_TAG_SEARCHFILE, static_cast<std::uint32_t>(102));
+	c2.AddTag(CECTag(EC_TAG_PARTFILE_NAME, std::string("third.mkv")));
+	c2.AddTag(CECTag(EC_TAG_PARTFILE_SIZE_FULL, static_cast<std::uint64_t>(123)));
+	c2.AddTag(CECTag(EC_TAG_SEARCH_PARENT, static_cast<std::uint32_t>(100)));
+	resp.AddTag(c2);
+
+	ApplySearchFull(&resp, cache);
+
+	ASSERT_EQUALS(static_cast<size_t>(1), cache.size());
+	const auto it = cache.find(100);
+	ASSERT_TRUE(it != cache.end());
+	ASSERT_TRUE(cache.find(101) == cache.end());
+	ASSERT_TRUE(cache.find(102) == cache.end());
+	ASSERT_EQUALS(static_cast<size_t>(2), it->second.children.size());
+	// map iterates ecid-ascending, so 101 folds before 102.
+	ASSERT_EQUALS(std::string("alt.name.mkv"), it->second.children[0].name);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(101), it->second.children[0].ecid);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(10), it->second.children[0].source_count);
+	ASSERT_EQUALS(std::string("third.mkv"), it->second.children[1].name);
+}
+
 // --- #359: peer software_version must be locale-independent ----------
 //
 // The daemon formats the version string with gettext, so an unidentified
@@ -1164,4 +1259,168 @@ TEST(Refresher, ClientKnownButNoVersionStringFallsBackToSentinel)
 	ApplyGetUpdateToClients(&resp, cache, no_files);
 	ASSERT_TRUE(cache.find(9) != cache.end());
 	ASSERT_EQUALS(std::string("unknown"), cache[9].software_version);
+}
+
+// --- #422: detail-only client fields decode --------------------------
+//
+// The section-B fields ride the INC_UPDATE client tag and are captured
+// into ClientSnapshot by MergeClientTag; the detail endpoint serializes
+// them. Verify each decodes, HighID/LowID derives from the hybrid id,
+// and EC_TAG_CLIENT_FROM maps to the stable origin token.
+TEST(Refresher, ClientDetailFieldsDecode)
+{
+	std::map<std::uint32_t, ClientSnapshot> cache;
+	std::map<std::uint32_t, std::string> no_files;
+	CECPacket resp(EC_OP_SHARED_FILES);
+	CECTag container(EC_TAG_CLIENT, static_cast<std::uint32_t>(0));
+
+	// A HighID peer carrying the full detail-only set.
+	CECTag hi(EC_TAG_CLIENT, static_cast<std::uint32_t>(50));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_USER_ID, static_cast<std::uint32_t>(0x04030201)));
+	// Host-order IPv4; FormatClientIpv4 renders LSB-first => 127.0.0.1.
+	hi.AddTag(CECTag(EC_TAG_CLIENT_SERVER_IP, static_cast<std::uint32_t>(0x0100007F)));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_SERVER_PORT, static_cast<std::uint16_t>(4242)));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_SERVER_NAME, wxString::FromUTF8("test-server")));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_KAD_PORT, static_cast<std::uint16_t>(4672)));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_FROM, static_cast<std::uint64_t>(3))); // SF_KADEMLIA
+	hi.AddTag(CECTag(EC_TAG_PARTFILE_NAME, wxString::FromUTF8("upload.iso")));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_AVAILABLE_PARTS, static_cast<std::uint32_t>(7)));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_MOD_VERSION, wxString::FromUTF8("mod-x")));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_DISABLE_VIEW_SHARED, true));
+	// #423 friend status + DL/UP modifier.
+	hi.AddTag(CECTag(EC_TAG_CLIENT_IS_FRIEND, true));
+	hi.AddTag(CECTag(EC_TAG_CLIENT_SCORE_RATIO, static_cast<double>(2.5)));
+	// #439 peer country ISO code resolved daemon-side.
+	hi.AddTag(CECTag(EC_TAG_CLIENT_COUNTRY, wxString::FromUTF8("de")));
+	container.AddTag(hi);
+
+	// A LowID peer (hybrid id < 0x1000000) with no section-B tags.
+	CECTag lo(EC_TAG_CLIENT, static_cast<std::uint32_t>(51));
+	lo.AddTag(CECTag(EC_TAG_CLIENT_USER_ID, static_cast<std::uint32_t>(1234)));
+	container.AddTag(lo);
+
+	resp.AddTag(container);
+	ApplyGetUpdateToClients(&resp, cache, no_files);
+
+	const auto it = cache.find(50);
+	ASSERT_TRUE(it != cache.end());
+	const ClientSnapshot &cs = it->second;
+	ASSERT_EQUALS(static_cast<std::uint32_t>(0x04030201), cs.user_id_hybrid);
+	ASSERT_TRUE(cs.high_id);
+	ASSERT_EQUALS(std::string("127.0.0.1"), cs.server_ip);
+	ASSERT_EQUALS(static_cast<std::uint16_t>(4242), cs.server_port);
+	ASSERT_EQUALS(std::string("test-server"), cs.server_name);
+	ASSERT_EQUALS(std::string("de"), cs.country_code);
+	ASSERT_EQUALS(static_cast<std::uint16_t>(4672), cs.kad_port);
+	ASSERT_EQUALS(std::string("kad"), cs.source_origin);
+	ASSERT_EQUALS(std::string("upload.iso"), cs.upload_file_name);
+	ASSERT_TRUE(cs.has_available_parts);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(7), cs.available_parts);
+	ASSERT_EQUALS(std::string("mod-x"), cs.mod_version);
+	ASSERT_TRUE(cs.view_shared_disabled);
+	ASSERT_TRUE(cs.is_friend);
+	ASSERT_TRUE(cs.dl_up_modifier > 2.4 && cs.dl_up_modifier < 2.6);
+
+	const auto it2 = cache.find(51);
+	ASSERT_TRUE(it2 != cache.end());
+	ASSERT_TRUE(!it2->second.high_id);
+	ASSERT_TRUE(!it2->second.has_available_parts);
+	// #423 fields absent on the wire => defaults preserved.
+	ASSERT_TRUE(!it2->second.is_friend);
+	ASSERT_TRUE(it2->second.dl_up_modifier == 0.0);
+}
+
+// --- #437: extended EC preference categories decode ------------------
+//
+// Covers both boolean encodings the core serializer uses: value tags
+// (share_hidden/exclude_regex/can_see_shares -> GetInt()!=0) and bare
+// presence tags (ich_enabled/use_secident -> tag present == true), plus
+// ints, strings, and the directories.shared string array.
+TEST(Refresher, PreferencesExtendedCategoriesDecode)
+{
+	CECPacket resp(EC_OP_SET_PREFERENCES);
+
+	CECEmptyTag dir(EC_TAG_PREFS_DIRECTORIES);
+	dir.AddTag(CECTag(EC_TAG_DIRECTORIES_INCOMING, wxString::FromUTF8("/inc")));
+	dir.AddTag(CECTag(EC_TAG_DIRECTORIES_TEMP, wxString::FromUTF8("/tmp")));
+	CECTag shared(EC_TAG_DIRECTORIES_SHARED, static_cast<std::uint32_t>(2));
+	shared.AddTag(CECTag(EC_TAG_STRING, wxString::FromUTF8("/a")));
+	shared.AddTag(CECTag(EC_TAG_STRING, wxString::FromUTF8("/b")));
+	dir.AddTag(shared);
+	dir.AddTag(CECTag(EC_TAG_DIRECTORIES_SHARE_HIDDEN, true)); // value-encoded bool
+	dir.AddTag(CECTag(EC_TAG_DIRECTORIES_EXCLUDE_REGEX, true));
+	resp.AddTag(dir);
+
+	CECEmptyTag files(EC_TAG_PREFS_FILES);
+	files.AddTag(CECEmptyTag(EC_TAG_FILES_ICH_ENABLED)); // presence == true
+	files.AddTag(CECTag(EC_TAG_FILES_MIN_FREE_SPACE, static_cast<std::uint32_t>(512)));
+	resp.AddTag(files);
+
+	CECEmptyTag srv(EC_TAG_PREFS_SERVERS);
+	srv.AddTag(CECTag(EC_TAG_SERVERS_DEAD_SERVER_RETRIES, static_cast<std::uint16_t>(5)));
+	srv.AddTag(CECTag(EC_TAG_SERVERS_UPDATE_URL, wxString::FromUTF8("http://srv")));
+	resp.AddTag(srv);
+
+	CECEmptyTag sec(EC_TAG_PREFS_SECURITY);
+	sec.AddTag(CECTag(EC_TAG_SECURITY_CAN_SEE_SHARES, true)); // value-encoded bool
+	sec.AddTag(CECTag(EC_TAG_IPFILTER_LEVEL, static_cast<std::uint32_t>(100)));
+	sec.AddTag(CECEmptyTag(EC_TAG_SECURITY_USE_SECIDENT)); // presence == true
+	resp.AddTag(sec);
+
+	CECEmptyTag cw(EC_TAG_PREFS_CORETWEAKS);
+	cw.AddTag(CECTag(EC_TAG_CORETW_MAX_CONN_PER_FIVE, static_cast<std::uint32_t>(200)));
+	cw.AddTag(CECTag(EC_TAG_CORETW_KAD_REASK_MS, static_cast<std::uint32_t>(1800000)));
+	resp.AddTag(cw);
+
+	CECEmptyTag kad(EC_TAG_PREFS_KADEMLIA);
+	kad.AddTag(CECTag(EC_TAG_KADEMLIA_UPDATE_URL, wxString::FromUTF8("http://nodes")));
+	resp.AddTag(kad);
+
+	CECEmptyTag ip2c(EC_TAG_PREFS_IP2COUNTRY);
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_SUPPORTED, true));  // value-encoded bool
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_ENABLED, true));    // value-encoded bool
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_SOURCE, (uint8)1)); // MaxMind
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_CUSTOM_URL, wxString::FromUTF8("http://geo")));
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_MAXMIND_LICENSE, wxString::FromUTF8("LICKEY")));
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_DB_LOADED, true)); // value-encoded bool
+	ip2c.AddTag(CECTag(EC_TAG_IP2COUNTRY_LOADED_SOURCE, wxString::FromUTF8("maxmind")));
+	resp.AddTag(ip2c);
+
+	PreferencesSnapshot p;
+	std::vector<CategorySnapshot> cats;
+	ParsePreferencesFromPacket(&resp, p, cats);
+
+	ASSERT_EQUALS(std::string("/inc"), p.directories.incoming);
+	ASSERT_EQUALS(std::string("/tmp"), p.directories.temp);
+	ASSERT_EQUALS(static_cast<size_t>(2), p.directories.shared.size());
+	ASSERT_EQUALS(std::string("/a"), p.directories.shared[0]);
+	ASSERT_TRUE(p.directories.share_hidden);
+	ASSERT_TRUE(p.directories.exclude_regex);
+	ASSERT_TRUE(!p.directories.auto_rescan); // absent -> false
+
+	ASSERT_TRUE(p.files.ich_enabled);
+	ASSERT_TRUE(!p.files.aich_trust); // absent presence tag -> false
+	ASSERT_EQUALS(static_cast<std::uint32_t>(512), p.files.min_free_space_mb);
+
+	ASSERT_EQUALS(static_cast<std::uint32_t>(5), p.servers.dead_server_retries);
+	ASSERT_EQUALS(std::string("http://srv"), p.servers.update_url);
+
+	ASSERT_TRUE(p.security.can_see_shares);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(100), p.security.ipfilter_level);
+	ASSERT_TRUE(p.security.use_secident);
+	ASSERT_TRUE(!p.security.obfuscation_required); // absent -> false
+
+	ASSERT_EQUALS(static_cast<std::uint32_t>(200), p.core_tweaks.max_conn_per_five);
+	ASSERT_EQUALS(static_cast<std::uint32_t>(1800000), p.core_tweaks.kad_reask_ms);
+	ASSERT_EQUALS(std::string("http://nodes"), p.kademlia.update_url);
+
+	ASSERT_TRUE(p.ip2country.supported);
+	ASSERT_TRUE(p.ip2country.enabled);
+	ASSERT_EQUALS(std::string("maxmind"), p.ip2country.source); // uint8 1 -> "maxmind"
+	ASSERT_EQUALS(std::string("http://geo"), p.ip2country.custom_url);
+	ASSERT_EQUALS(std::string("LICKEY"), p.ip2country.maxmind_license);
+	ASSERT_TRUE(!p.ip2country.auto_update); // absent -> false
+	ASSERT_TRUE(p.ip2country.db_loaded);
+	ASSERT_EQUALS(std::string("maxmind"), p.ip2country.loaded_source);
+	ASSERT_TRUE(!p.ip2country.downloading); // absent -> false
 }

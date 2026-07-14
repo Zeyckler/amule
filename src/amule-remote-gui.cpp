@@ -41,6 +41,10 @@
 #include "amule.h"             // Interface declarations.
 #include "CamuleArtProvider.h" // Needed for wxArtProvider::Push() in OnInit
 #include "amuleDlg.h"          // Needed for CamuleDlg
+
+#include <wx/sizer.h>    // CReconnectDialog layout (issue #444)
+#include <wx/stattext.h> // CReconnectDialog status label
+#include <wx/button.h>   // CReconnectDialog abort button
 #include "ClientCredits.h"
 #include "SourceListCtrl.h"
 #include "ChatWnd.h"
@@ -49,7 +53,7 @@
 #include "Friend.h"
 #include "GetTickCount.h" // Needed for GetTickCount64
 #include "GuiEvents.h"
-#ifdef ENABLE_IP2COUNTRY
+#ifdef GEOIP_GUI
 #include "IP2Country.h" // Needed for IP2Country
 #endif
 #include "InternalEvents.h" // Needed for wxEVT_CORE_FINISHED_HTTP_DOWNLOAD
@@ -122,6 +126,55 @@ void CEConnectDlg::OnOK(wxCommandEvent &evt)
 
 wxDEFINE_EVENT(wxEVT_EC_INIT_DONE, wxEvent);
 
+// ----------------------------------------------------------------------
+// Reconnect-after-loss dialog (issue #444). Shown modally while amulegui
+// re-establishes a dropped EC connection: modal so the main window is
+// frozen (the user must not act on stale data or queue EC commands at a
+// dead socket), while the retry timer + socket events still pump in the
+// modal loop. The wxID_CANCEL "Abort and exit" button ends the modal
+// with wxID_CANCEL; a successful reconnect ends it with wxID_OK from
+// CamuleRemoteGuiApp::OnECConnection.
+// ----------------------------------------------------------------------
+class CReconnectDialog : public wxDialog
+{
+public:
+	CReconnectDialog(wxWindow *parent, const wxString &target)
+	: wxDialog(parent, wxID_ANY, _("Connection lost"), wxDefaultPosition, wxDefaultSize, wxCAPTION)
+	, m_label(nullptr)
+	, m_target(target)
+	{
+		wxBoxSizer *top = new wxBoxSizer(wxVERTICAL);
+		m_label = new wxStaticText(this, wxID_ANY, wxEmptyString);
+		top->Add(m_label, 0, wxALL, 15);
+		top->Add(new wxButton(this, wxID_CANCEL, _("Abort and exit")),
+			0,
+			wxALIGN_CENTER | wxLEFT | wxRIGHT | wxBOTTOM,
+			15);
+		SetAttempt(1);
+		SetSizerAndFit(top);
+		CentreOnParent();
+	}
+
+	// Shown while a connect attempt is in flight.
+	void SetAttempt(int n) { SetStatus(CFormat(_("Reconnecting... (attempt %d)")) % n); }
+
+	// Shown counting down to the next attempt after a failure.
+	void SetCountdown(int seconds) { SetStatus(CFormat(_("Next attempt in %d s...")) % seconds); }
+
+private:
+	// Only the middle line changes; the (widest) "paused" line is constant,
+	// so the dialog keeps its size and doesn't jump on each update.
+	void SetStatus(const wxString &middle)
+	{
+		m_label->SetLabel(CFormat(_("Connection to %s lost.\n%s\n\nThe interface is paused "
+					    "until the connection is restored.")) %
+				  m_target % middle);
+	}
+
+	wxStaticText *m_label;
+	wxString m_target;
+};
+
 wxBEGIN_EVENT_TABLE(CamuleRemoteGuiApp, wxApp)
 	// macOS Dock right-click -> Quit ends the session without going through
 	// the red-X / Cmd+Q paths; catch it so ShutDown + OnExit cleanup still runs.
@@ -132,13 +185,15 @@ wxBEGIN_EVENT_TABLE(CamuleRemoteGuiApp, wxApp)
 	EVT_TIMER(ID_CORE_TIMER_EVENT, CamuleRemoteGuiApp::OnPollTimer)
 	// Watchdog on the initial EC connect attempt
 	EVT_TIMER(ID_REMOTE_CONNECT_TIMEOUT_TIMER, CamuleRemoteGuiApp::OnConnectTimeout)
+	// Spacing between reconnect attempts after a post-startup loss (#444)
+	EVT_TIMER(ID_REMOTE_RECONNECT_TIMER, CamuleRemoteGuiApp::OnReconnectTimer)
 
 	EVT_CUSTOM(wxEVT_EC_CONNECTION, -1, CamuleRemoteGuiApp::OnECConnection)
 	EVT_CUSTOM(wxEVT_EC_INIT_DONE, -1, CamuleRemoteGuiApp::OnECInitDone)
 
 	EVT_MULE_NOTIFY(CamuleRemoteGuiApp::OnNotifyEvent)
 
-#ifdef ENABLE_IP2COUNTRY
+#ifdef GEOIP_GUI
 	// HTTPDownload finished
 	EVT_MULE_INTERNAL(wxEVT_CORE_FINISHED_HTTP_DOWNLOAD, -1, CamuleRemoteGuiApp::OnFinishedHTTPDownload)
 #endif
@@ -306,13 +361,11 @@ void CamuleRemoteGuiApp::OnPollTimer(wxTimerEvent &)
 	}
 }
 
-void CamuleRemoteGuiApp::OnFinishedHTTPDownload(CMuleInternalEvent &event)
+void CamuleRemoteGuiApp::OnFinishedHTTPDownload(CMuleInternalEvent &WXUNUSED(event))
 {
-	if (event.GetInt() == HTTP_GeoIP) {
-		amuledlg->IP2CountryDownloadFinished(event.GetExtraInt64());
-		// If we updated, the dialog is already up. Redraw it to show the flags.
-		amuledlg->Refresh();
-	}
+	// amulegui has no local GeoIP resolver — country codes arrive over EC from
+	// the daemon (#439 / #440) — so it never starts a GeoIP download and there
+	// is nothing to finish here.
 }
 
 void CamuleRemoteGuiApp::ShutDown(wxCloseEvent &WXUNUSED(evt))
@@ -548,8 +601,21 @@ void CamuleRemoteGuiApp::OnECConnection(wxEvent &event)
 	wxString reply = evt.GetServerReply();
 	AddLogLineC(reply);
 	if (evt.GetResult() == true) {
-		// Connected - go to next init step
-		glob_prefs->LoadRemote();
+		if (m_reconnecting) {
+			// Reconnected: close the modal reconnect dialog. Execution
+			// resumes right after ShowModal() in BeginReconnect(), which
+			// re-arms the reconcile prune and restarts polling.
+			if (m_reconnectDlg) {
+				m_reconnectDlg->EndModal(wxID_OK);
+			}
+		} else {
+			// Connected - go to next init step
+			glob_prefs->LoadRemote();
+		}
+	} else if (m_reconnecting) {
+		// A reconnect attempt failed. Space out the next one; the modal
+		// dialog stays up with the attempt count and an Abort button.
+		ScheduleNextReconnect();
 	} else if (dialog) {
 		// Connect failed during the initial attempt or a previous
 		// retry (dialog is still alive — it's only destroyed in
@@ -571,14 +637,10 @@ void CamuleRemoteGuiApp::OnECConnection(wxEvent &event)
 			ExitMainLoop();
 		}
 	} else {
-		// Server disconnected after Startup() already ran — the
-		// dialog is gone, the rest of the app is wired up, and we
-		// have no clean path back. Tell the user and shut down.
-		AddLogLineNS(_("Going down"));
-		wxMessageBox(_("Connection closed - aMule has terminated probably."), _("ERROR"), wxOK);
-		wxCloseEvent ev;
-		ShutDown(ev);
-		ExitMainLoop();
+		// Connection lost after startup (e.g. the machine slept and the
+		// EC socket dropped). Don't quit — freeze the UI and reconnect in
+		// the background until we're back or the user aborts (issue #444).
+		BeginReconnect();
 	}
 }
 
@@ -586,6 +648,15 @@ void CamuleRemoteGuiApp::OnConnectTimeout(wxTimerEvent &)
 {
 	delete connect_timeout_timer;
 	connect_timeout_timer = NULL;
+
+	if (m_reconnecting) {
+		// This reconnect attempt hung (host unreachable, SYN black-holed).
+		// Treat it as a failed attempt and space out the next one; the
+		// modal reconnect dialog stays up with its Abort button (#444).
+		AddLogLineCS(_("Reconnect attempt timed out; retrying."));
+		ScheduleNextReconnect();
+		return;
+	}
 
 	wxString host = dialog ? dialog->Host() : wxString();
 	long port = dialog ? dialog->Port() : 0;
@@ -607,6 +678,145 @@ void CamuleRemoteGuiApp::OnConnectTimeout(wxTimerEvent &)
 	}
 }
 
+void CamuleRemoteGuiApp::BeginReconnect()
+{
+	if (m_reconnecting) {
+		return;
+	}
+	m_reconnecting = true;
+	m_reconnectAttempt = 0;
+
+	AddLogLineCS(_("Connection to the remote core was lost. Trying to reconnect..."));
+
+	// Freeze polling while disconnected: the poll timer would fire
+	// GET_UPDATE at a dead socket, and the GUI timer animates stale data.
+	if (poll_timer) {
+		poll_timer->Stop();
+	}
+	if (amuledlg) {
+		amuledlg->StopGuiTimer();
+	}
+
+	if (!m_reconnectTimer) {
+		m_reconnectTimer = new wxTimer(this, ID_REMOTE_RECONNECT_TIMER);
+	}
+
+	m_reconnectDlg = new CReconnectDialog(amuledlg, CFormat(wxT("%s:%d")) % m_ecHost % m_ecPort);
+
+	// Kick off the first attempt, then run the dialog modally: the retry
+	// timer and OnECConnection pump inside ShowModal(). A success calls
+	// EndModal(wxID_OK); the Abort button ends it with wxID_CANCEL.
+	AttemptReconnect();
+	int result = m_reconnectDlg->ShowModal();
+
+	m_reconnecting = false;
+	if (m_reconnectTimer) {
+		m_reconnectTimer->Stop();
+	}
+	delete connect_timeout_timer;
+	connect_timeout_timer = nullptr;
+	m_reconnectDlg->Destroy();
+	m_reconnectDlg = nullptr;
+
+	if (result == wxID_OK) {
+		AddLogLineCS(_("Reconnected to the remote core."));
+		// The next full poll reconciles every list against the fresh server
+		// snapshot in place (update / add / prune) — no wipe, so scroll and
+		// selection survive. Arm the one-shot prune for the file lists and
+		// resume polling.
+		if (knownfiles) {
+			knownfiles->ArmReconnectReconcile();
+		}
+		if (poll_timer) {
+			poll_timer->Start(1000);
+		}
+		if (amuledlg) {
+			amuledlg->StartGuiTimer();
+		}
+	} else {
+		// User aborted the reconnect.
+		AddLogLineNS(_("Going down"));
+		wxCloseEvent ev;
+		ShutDown(ev);
+		ExitMainLoop();
+	}
+}
+
+void CamuleRemoteGuiApp::AttemptReconnect()
+{
+	m_reconnectAttempt++;
+	if (m_reconnectDlg) {
+		m_reconnectDlg->SetAttempt(m_reconnectAttempt);
+	}
+
+	AddLogLineCS(CFormat(_("Reconnect attempt %d: connecting to %s:%d")) % m_reconnectAttempt % m_ecHost %
+		     m_ecPort);
+
+	// Reset ALL layers of the reused connection: the pending-request FIFO
+	// (orphaned handlers from requests the dropped socket left unanswered
+	// would otherwise mis-pair with the new session's replies — a stats reply
+	// routed to the file-list handler wipes the download / shared lists, #444),
+	// the EC packet-reassembly state (a stale mid-packet read left over from
+	// the drop would otherwise misparse the new session's first bytes and the
+	// login would fail) and a fresh asio socket on the SAME CRemoteConnect
+	// object (keeps every remote container's m_conn pointer valid). Capability
+	// flags persist on the object, so ConnectToCore re-runs the login handshake
+	// as on first connect.
+	m_connect->DiscardRequestQueue();
+	m_connect->ResetProtocolState();
+	m_connect->ResetForReconnect();
+
+	// Per-attempt watchdog so an attempt that hangs (host unreachable, SYN
+	// black-holed) doesn't stall the retry loop; OnConnectTimeout treats a
+	// fire as a failed attempt. Cancelled by OnECConnection when the attempt
+	// resolves either way.
+	delete connect_timeout_timer;
+	connect_timeout_timer = new wxTimer(this, ID_REMOTE_CONNECT_TIMEOUT_TIMER);
+	connect_timeout_timer->StartOnce(15000);
+
+	if (!m_connect->ConnectToCore(
+		    m_ecHost, m_ecPort, wxEmptyString, m_ecPass, "amule-remote", "0x0001")) {
+		// Couldn't even initiate the connect — space out the next attempt.
+		AddLogLineCS(_("Reconnect could not start; retrying shortly."));
+		delete connect_timeout_timer;
+		connect_timeout_timer = nullptr;
+		ScheduleNextReconnect();
+	}
+	// else: async — OnECConnection resolves success/failure.
+}
+
+void CamuleRemoteGuiApp::ScheduleNextReconnect()
+{
+	// Drop any pending per-attempt watchdog, then count down 5 s to the next
+	// attempt via a repeating 1 s tick that updates the dialog, so the user
+	// sees when the retry will fire and an unreachable daemon isn't hammered.
+	delete connect_timeout_timer;
+	connect_timeout_timer = nullptr;
+	m_reconnectCountdown = 5;
+	if (m_reconnectDlg) {
+		m_reconnectDlg->SetCountdown(m_reconnectCountdown);
+	}
+	if (m_reconnectTimer) {
+		m_reconnectTimer->Start(1000);
+	}
+}
+
+void CamuleRemoteGuiApp::OnReconnectTimer(wxTimerEvent &)
+{
+	if (!m_reconnecting) {
+		return;
+	}
+	if (--m_reconnectCountdown > 0) {
+		if (m_reconnectDlg) {
+			m_reconnectDlg->SetCountdown(m_reconnectCountdown);
+		}
+		return;
+	}
+	// Countdown elapsed — fire the next attempt.
+	m_reconnectTimer->Stop();
+	AttemptReconnect();
+}
+
 void CamuleRemoteGuiApp::OnECInitDone(wxEvent &)
 {
 	Startup();
@@ -626,6 +836,12 @@ void CamuleRemoteGuiApp::Startup()
 		wxConfig::Get()->Write("/EC/Password", dialog->PassHash());
 		wxConfig::Get()->Write("/EC/ForceZLIB", dialog->ForceZlib() ? 1l : 0l);
 	}
+	// Capture the EC connection params so a post-startup reconnect
+	// (issue #444) can re-dial without the (about-to-be-destroyed) dialog.
+	m_ecHost = dialog->Host();
+	m_ecPort = dialog->Port();
+	m_ecPass = dialog->PassHash();
+
 	dialog->Destroy();
 	dialog = NULL;
 
@@ -666,12 +882,9 @@ void CamuleRemoteGuiApp::Startup()
 	// a ~1 s wait for OnPollTimer to notice the file. No-op if empty.
 	AddLinksFromFile();
 
-	// Now activate GeoIP, so that the download dialog doesn't get destroyed immediately
-#ifdef ENABLE_IP2COUNTRY
-	if (thePrefs::IsGeoIPEnabled()) {
-		amuledlg->m_IP2Country->Enable();
-	}
-#endif
+	// amulegui does no local GeoIP resolution: the daemon resolves country
+	// codes and sends them over EC (#439 / #440), and amulegui only renders the
+	// flags. GeoIP settings are managed against the daemon, not locally.
 }
 
 int CamuleRemoteGuiApp::ShowAlert(wxString msg, wxString title, int flags)
@@ -682,6 +895,16 @@ int CamuleRemoteGuiApp::ShowAlert(wxString msg, wxString title, int flags)
 void CamuleRemoteGuiApp::AddRemoteLogLine(const wxString &line)
 {
 	amuledlg->AddLogLine(line);
+}
+
+void CamuleRemoteGuiApp::BeginRemoteLogBatch()
+{
+	amuledlg->BeginLogBatch();
+}
+
+void CamuleRemoteGuiApp::EndRemoteLogBatch()
+{
+	amuledlg->EndLogBatch();
 }
 
 int CamuleRemoteGuiApp::InitGui(bool geometry_enabled, wxString &geom_string)
@@ -879,7 +1102,7 @@ CPreferencesRem::CPreferencesRem(CRemoteConnect *conn)
 	m_exchange_send_selected_prefs = EC_PREFS_GENERAL | EC_PREFS_CONNECTIONS | EC_PREFS_MESSAGEFILTER |
 					 EC_PREFS_ONLINESIG | EC_PREFS_SERVERS | EC_PREFS_FILES |
 					 EC_PREFS_DIRECTORIES | EC_PREFS_SECURITY | EC_PREFS_CORETWEAKS |
-					 EC_PREFS_REMOTECONTROLS | EC_PREFS_KADEMLIA;
+					 EC_PREFS_REMOTECONTROLS | EC_PREFS_KADEMLIA | EC_PREFS_IP2COUNTRY;
 	m_exchange_recv_selected_prefs = m_exchange_send_selected_prefs | EC_PREFS_CATEGORIES;
 }
 
@@ -912,6 +1135,14 @@ void CPreferencesRem::HandlePacket(const CECPacket *packet)
 
 bool CPreferencesRem::LoadRemote()
 {
+#ifdef GEOIP_GUI
+	// Assume the core has NO GeoIP support until it says otherwise. A 3.1+ core
+	// built with ENABLE_IP2COUNTRY answers with EC_TAG_IP2COUNTRY_SUPPORTED (see
+	// CEC_Prefs_Packet::Apply); a pre-3.1 core (e.g. 3.0.1) omits the whole
+	// category, so leaving this default false correctly hides the IP2Country
+	// page rather than offering settings the core can't honour.
+	thePrefs::SetGeoIPSupported(false);
+#endif
 	//
 	// override local settings with remote
 	CECPacket req(EC_OP_GET_PREFERENCES, EC_DETAIL_UPDATE);
@@ -1220,6 +1451,13 @@ void CServerListRem::ProcessItemUpdate(const CEC_Server_Tag *tag, CServer *serve
 	tag->ServerName(&server->listname);
 	tag->ServerDesc(&server->description);
 	tag->ServerVersion(&server->m_strVersion);
+#ifdef GEOIP_GUI
+	// Server host country from the daemon's GeoIP (#440); check tag presence
+	// so an authoritative empty code isn't mistaken for an absent tag.
+	if (tag->GetTagByName(EC_TAG_SERVER_COUNTRY)) {
+		server->SetCountryCode(tag->Country());
+	}
+#endif
 	tag->GetMaxUsers(&server->maxusers);
 
 	tag->GetFiles(&server->files);
@@ -1301,6 +1539,16 @@ void CSharedFilesRem::SetFileCommentRating(CKnownFile *file, const wxString &new
 	request.AddTag(CECTag(EC_TAG_KNOWNFILE, file->GetFileHash()));
 	request.AddTag(CECTag(EC_TAG_KNOWNFILE_COMMENT, newComment));
 	request.AddTag(CECTag(EC_TAG_KNOWNFILE_RATING, newRating));
+
+	m_conn->SendPacket(&request);
+}
+
+void CSharedFilesRem::SearchKadNotes(CKnownFile *file)
+{
+	// The daemon owns Kad; ask it to run the on-demand NOTES lookup for this file.
+	// Retrieved notes flow back through the normal partfile-comments channel.
+	CECPacket request(EC_OP_SHARED_FILE_SEARCH_KAD_NOTES);
+	request.AddTag(CECTag(EC_TAG_KNOWNFILE, file->GetFileHash()));
 
 	m_conn->SendPacket(&request);
 }
@@ -1432,11 +1680,48 @@ void CSharedFilesRem::SetFilePrio(CKnownFile *file, uint8 prio)
 	m_conn->SendPacket(&req);
 }
 
+void CKnownFilesRem::ArmReconnectReconcile()
+{
+	m_reconnectReconcile = true;
+
+	// A reconnect opens a fresh EC session. The daemon keeps its RLE gap/part/
+	// req-status encoders per connection (CFileEncoderMap in ExternalConn.cpp),
+	// so the new session's encoders restart from an empty baseline. Our reused
+	// CKnownFile / CPartFile objects still carry the previous session's
+	// *decoder* state; left alone, the first differential status update would
+	// XOR the daemon's from-empty diff against that stale buffer and paint
+	// garbage — all-red download progress bars and wrong shared-file
+	// availability shading (issue #444). Reset every decoder now so both ends
+	// share the same empty baseline before the first post-reconnect update.
+	for (CKnownFile *file : *this) {
+		file->m_partStatus.ResetEncoder();
+		if (file->IsPartFile()) {
+			static_cast<CPartFile *>(file)->m_PartFileEncoderData.ResetDecoder();
+		}
+	}
+}
+
 void CKnownFilesRem::ProcessUpdate(const CECTag *reply, CECPacket *, int)
 {
 	requested = 0;
 	transferred = 0;
 	accepted = 0;
+
+	// The first poll after a reconnect re-processes the whole (potentially
+	// 10k+) library in one go (update-in-place + add + prune). Batch both
+	// list ctrls so that stays one repaint + one sort instead of per row
+	// (issue #444). Captured now because ProcessItemUpdate/AddFile below,
+	// and the final prune, all touch the ctrls; the flag itself is cleared
+	// at the end. The cold-boot m_initialUpdate path has its own batching
+	// (ShowFileList) and never overlaps — m_initialUpdate is false here.
+	const bool reconcile = m_reconnectReconcile;
+	if (reconcile) {
+		theApp->amuledlg->m_transferwnd->downloadlistctrl->BeginBatchUpdate();
+		theApp->amuledlg->m_sharedfileswnd->sharedfilesctrl->BeginBatchUpdate();
+	}
+	// Set below if the reconnect reconcile reply is too empty to trust as a
+	// full snapshot: keep the one-shot armed instead of pruning (see #444).
+	bool deferReconcile = false;
 
 	// Partial-update protocol negotiated at auth time (see
 	// CRemoteConnect::ServerSupportsPartialUpdate). When true, the server
@@ -1471,7 +1756,12 @@ void CKnownFilesRem::ProcessUpdate(const CECTag *reply, CECPacket *, int)
 			uint32 id = tag->ID();
 			bool isNew = true;
 			if (!m_initialUpdate) {
-				if (!partial_update) {
+				// Collect the full ID set whenever we mean to prune by
+				// absence below: a legacy server always (it emits alive
+				// markers for every file), or once right after a reconnect
+				// (m_reconnectReconcile — the fresh session sends a full
+				// snapshot we reconcile against).
+				if (!partial_update || m_reconnectReconcile) {
 					core_files.insert(id);
 				}
 				std::map<uint32, CKnownFile *>::iterator it2 = m_items_hash.find(id);
@@ -1558,10 +1848,10 @@ void CKnownFilesRem::ProcessUpdate(const CECTag *reply, CECPacket *, int)
 		theApp->amuledlg->m_sharedfileswnd->sharedfilesctrl->ShowFileList();
 		theApp->amuledlg->m_transferwnd->downloadlistctrl->ShowFileList();
 		m_initialUpdate = false;
-	} else if (partial_update) {
-		// Apply explicit removals from `EC_TAG_FILE_REMOVED` markers.
-		// One linear pass over the live list, only when there's
-		// actually something to remove.
+	} else if (partial_update && !m_reconnectReconcile) {
+		// Normal partial-update poll: apply explicit removals from
+		// `EC_TAG_FILE_REMOVED` markers. One linear pass over the live
+		// list, only when there's actually something to remove.
 		if (!removed_files.empty()) {
 			for (iterator it = begin(); it != end();) {
 				iterator it2 = it++;
@@ -1570,11 +1860,24 @@ void CKnownFilesRem::ProcessUpdate(const CECTag *reply, CECPacket *, int)
 				}
 			}
 		}
+	} else if (reconcile && core_files.empty() && GetCount() != 0) {
+		// Defensive guard (#444): the first poll after a reconnect should
+		// carry the full library snapshot. If it came back with no file tags
+		// at all while we still hold a populated list, that reply is not a
+		// trustworthy baseline — pruning by absence here would wipe every
+		// download and shared file. Skip the prune and leave the one-shot
+		// armed so the next poll reconciles against a real snapshot instead.
+		AddDebugLogLineN(logEC,
+			wxT("EC: post-reconnect reconcile reply carried no files; "
+			    "deferring the absence-prune to the next poll."));
+		deferReconcile = true;
 	} else {
-		// Legacy server: anything missing from the response is
-		// deleted. Server emits alive-marker tags for unchanged
-		// files so this remains correct without the per-file diff
-		// work that the partial-update path skips.
+		// Legacy server (alive-marker protocol), OR the first poll after a
+		// reconnect (m_reconnectReconcile): anything missing from the
+		// response is deleted. On reconnect the fresh partial-update server
+		// sends a full snapshot but never re-emits FILE_REMOVED for files
+		// deleted while we were disconnected, so this one-shot prune against
+		// the full ID set is how those stale entries get cleared.
 		for (iterator it = begin(); it != end();) {
 			iterator it2 = it++;
 			if (!core_files.count(GetItemID(*it2))) {
@@ -1582,6 +1885,15 @@ void CKnownFilesRem::ProcessUpdate(const CECTag *reply, CECPacket *, int)
 						 // views.
 			}
 		}
+	}
+	if (reconcile) {
+		theApp->amuledlg->m_transferwnd->downloadlistctrl->EndBatchUpdate();
+		theApp->amuledlg->m_sharedfileswnd->sharedfilesctrl->EndBatchUpdate();
+	}
+	// One-shot: consumed by the first post-reconnect poll above, unless the
+	// reply was too empty to trust and we left the flag armed for the next.
+	if (!deferReconcile) {
+		m_reconnectReconcile = false;
 	}
 }
 
@@ -1761,6 +2073,15 @@ void CUpDownClientListRem::ProcessItemUpdate(const CEC_UpDownClient_Tag *tag, CC
 
 	tag->UserID(&client->m_nUserIDHybrid);
 	tag->ClientName(&client->m_Username);
+#ifdef GEOIP_GUI
+	// Peer country from the daemon's GeoIP (#439). Check tag *presence*, not
+	// its value: a present-but-empty tag is an authoritative "unknown" and
+	// must still mark the code as core-provided so the client list doesn't
+	// try a (non-existent) local fallback.
+	if (tag->GetTagByName(EC_TAG_CLIENT_COUNTRY)) {
+		client->SetCountryCode(tag->Country());
+	}
+#endif
 	// Client Software
 	bool sw_updated = false;
 	if (tag->ClientSoftware(client->m_clientSoft)) {
@@ -2125,6 +2446,12 @@ void CKnownFilesRem::ProcessItemUpdatePartfile(const CEC_PartFile_Tag *tag, CPar
 			file->AddFileRatingList(u, f, r, c);
 		}
 		file->UpdateFileRatingCommentAvail();
+	}
+
+	// Reflect whether an on-demand Kad notes lookup is running on the daemon, so
+	// the comments dialog can auto-refresh while it is in flight and stop when done.
+	if (const CECTag *kadSearchTag = tag->GetTagByName(EC_TAG_PARTFILE_KAD_COMMENT_SEARCHING)) {
+		file->SetKadCommentSearchRunning(kadSearchTag->GetInt() != 0);
 	}
 
 	// Update A4AF sources

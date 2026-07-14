@@ -26,7 +26,8 @@ The API is versioned in the path. Breaking changes ship under `/api/v1/`; `/api/
 **Downloads**
 - [`GET /api/v0/downloads`](#get-apiv0downloads) — list active queue
 - [`GET /api/v0/downloads/{hash}`](#get-apiv0downloadshash) — detail view; `{hash}` is the 32-char MD4 hex hash
-- [`GET /api/v0/downloads/{hash}/comments`](#get-apiv0downloadshashcomments) — per-source comments/ratings list
+- [`GET /api/v0/downloads/{hash}/comments`](#get-apiv0downloadshashcomments) — per-source comments/ratings list (incl. retrieved Kad notes)
+- [`POST /api/v0/downloads/{hash}/comments`](#post-apiv0downloadshashcomments) — trigger an on-demand Kad notes lookup
 - [`GET /api/v0/downloads/{hash}/filenames`](#get-apiv0downloadshashfilenames) — source-reported filenames + counts
 - [`GET /api/v0/downloads/{hash}/a4af`](#get-apiv0downloadshasha4af) — A4AF source list + auto flag
 - [`POST /api/v0/downloads/{hash}/a4af`](#post-apiv0downloadshasha4af) — force A4AF source-swapping
@@ -39,6 +40,7 @@ The API is versioned in the path. Breaking changes ship under `/api/v1/`; `/api/
 
 **Clients (peers)**
 - [`GET /api/v0/clients`](#get-apiv0clients) — list peers, optional filter
+- [`GET /api/v0/clients/{ecid}`](#get-apiv0clientsecid) — full detail for one peer
 
 **Shared files**
 - [`GET /api/v0/shared`](#get-apiv0shared) — list shared files
@@ -61,8 +63,8 @@ The API is versioned in the path. Breaking changes ship under `/api/v1/`; `/api/
 - [`DELETE /api/v0/categories/{index}`](#delete-apiv0categoriesindex) — remove
 
 **Preferences**
-- [`GET /api/v0/preferences`](#get-apiv0preferences) — read connection + general prefs
-- [`PATCH /api/v0/preferences`](#patch-apiv0preferences) — update subset of prefs
+- [`GET /api/v0/preferences`](#get-apiv0preferences) — read all EC-carried preference categories
+- [`PATCH /api/v0/preferences`](#patch-apiv0preferences) — update any subset of prefs
 
 **Network control**
 - [`POST /api/v0/networks/connect`](#post-apiv0networksconnect) — connect ed2k / kad / both
@@ -501,7 +503,8 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://$HOST/api/v0/downloads"
       "priority_auto": true,
       "category":      0,
       "sources":  { "total": 217, "not_current": 23, "transferring": 8, "a4af": 4 },
-      "progress": { "percent": 29.85 }
+      "progress": { "percent": 29.85 },
+      "kad_search_running": false
     }
   ]
 }
@@ -512,6 +515,8 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://$HOST/api/v0/downloads"
 `priority` is the download priority — one of `"low"`, `"normal"` or `"high"` — and `priority_auto` is `true` when amuled is deriving that level automatically. Downloads never report `very_low` or `release`; those are shared/upload-side levels only. A file that is simultaneously downloading and shared carries two independent priorities: this download priority, and the upload priority reported by [`GET /api/v0/shared`](#get-apiv0shared). Changing one does not affect the other.
 
 The list shape omits `progress.parts` to keep large libraries compact. Use the detail endpoint for per-part state.
+
+`kad_search_running` is `true` while an on-demand Kad notes lookup is in flight for the file (started by [`POST /downloads/{hash}/comments`](#post-apiv0downloadshashcomments)); it flips back to `false` when the lookup finishes. Because it lives on the download object, a client can watch the `download_updated` SSE event for the start → finish transition instead of polling.
 
 The SSE `download_added` / `download_updated` event payload matches this object byte-for-byte.
 
@@ -544,7 +549,8 @@ Same envelope as the list item, plus the detail-only fields below (all omitted f
 | `gained_by_compression` | int | Bytes saved by on-the-wire compression. |
 | `saved_by_ich` | int | Packets recovered by Intelligent Corruption Handling. |
 | `aich_hash` | string | AICH master hash (hex); `""` if not yet computed. |
-| `met_file` | string | The partfile's on-disk basename (e.g. `001.part`). |
+| `met_file` | string | The partfile's `.part` control-file basename (e.g. `001.part`). `""` once the download has completed (status `completed`, before `clear_completed`). |
+| `path` | string | Directory the file lives in on disk — the Temp directory while downloading, the destination directory once completed. |
 | `partmet_id` | int | Numeric partfile id. |
 | `queued_count` | int | Clients waiting on this file's upload queue. |
 | `comment` | string | The user's own comment on this file (`""` if none). |
@@ -582,6 +588,8 @@ The `media` object (on both `GET /downloads/{hash}` and `GET /shared/{hash}`) ca
 
 The comments and ratings this download's **sources** report for the file (the desktop "Show all comments" list). Downloads-only — a completed/shared file has no live source list.
 
+The list also includes any **Kad community notes** retrieved on demand via `POST` on this same path (see below). A Kad note's `username` is the responding node's IP address when the note carries one, otherwise the placeholder `Kad user`.
+
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" \
   "http://$HOST/api/v0/downloads/8b54a3c2…/comments"
@@ -590,12 +598,15 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ```json
 {
   "count": 2,
+  "kad_search_running": false,
   "comments": [
-    { "username": "alice", "filename": "Some.Movie.mkv", "rating": 5, "comment": "great quality" },
-    { "username": "bob",   "filename": "some_movie.avi", "rating": -1, "comment": "no rating here" }
+    { "username": "alice",    "filename": "Some.Movie.mkv", "rating": 5, "comment": "great quality" },
+    { "username": "Kad user", "filename": "some_movie.avi", "rating": 4, "comment": "" }
   ]
 }
 ```
+
+`kad_search_running` is `true` while an on-demand Kad notes lookup (triggered by the `POST` below) is in flight; poll until it returns to `false` to know the lookup finished. Kad notes appear as ordinary entries whose `username` is the responding node's IP (or `Kad user` when the note carries no IP).
 
 A per-source `rating` of `-1` means the source left a comment but no rating. Rating scale (from the desktop `GetRateString()`):
 
@@ -609,6 +620,23 @@ A per-source `rating` of `-1` means the source left a comment but no rating. Rat
 | 5 | Excellent |
 
 **Errors:** `404 not_found` (no download with that hash), `503 ec_unavailable`.
+
+#### `POST /api/v0/downloads/{hash}/comments`
+
+**Auth:** `USER`
+
+Trigger an on-demand **Kad notes** lookup for this download (the desktop "Get from Kad" button). aMule asks the Kad network for community ratings/comments keyed on the file hash. The lookup is **asynchronous** on the daemon (it can take up to ~45 s); this call returns immediately with `202 Accepted`, and the retrieved notes then show up in the `GET` list above. Poll the `GET` endpoint to observe them arrive.
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://$HOST/api/v0/downloads/8b54a3c2…/comments"
+```
+
+```json
+{ "status": "kad_search_started" }
+```
+
+**Errors:** `404 not_found` (no download with that hash), `503 ec_unavailable`, `400 amuled_rejected` (daemon refused, e.g. Kad not connected).
 
 #### `GET /api/v0/downloads/{hash}/filenames`
 
@@ -839,6 +867,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
       "client_name": "AnonymousPeer",
       "user_hash": "1f2e3a...",
       "ip": "203.0.113.42",
+      "country_code": "de",
       "port": 4662,
       "software": "eMule",
       "software_version": "0.50a",
@@ -862,13 +891,78 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-`client_ecid` identifies the remote *peer*, not a file — it's the URL key reserved for any future `/clients/{client_ecid}` mutation and the identity carried in `client_removed` SSE payloads. `user_hash` is the peer's stable identity *when published* (peers without SecIdent or in their first session don't have one), so `client_ecid` is the always-populated handle.
+`client_ecid` identifies the remote *peer*, not a file — it's the URL key for [`GET /api/v0/clients/{ecid}`](#get-apiv0clientsecid) and the identity carried in `client_removed` SSE payloads. `user_hash` is the peer's stable identity *when published* (peers without SecIdent or in their first session don't have one), so `client_ecid` is the always-populated handle.
 
 `upload_file_hash` / `download_file_hash` are the 32-char MD4 hex hashes of the partfile or shared file the peer is currently transferring with — directly resolvable against [`/api/v0/downloads/{hash}`](#get-apiv0downloadshash) (in-progress) or the corresponding entry in [`/api/v0/shared`](#get-apiv0shared) by `.hash`. Either field can be empty when the peer is queued / idle in that direction. `download_file_name` is the filename the peer advertised in `OP_REQFILENAMEANSWER` and is populated only while we're actively downloading from them.
 
 `software` and `software_version` are locale-independent, per the API's English-only contract. A peer the daemon could not identify reports `"software": "unknown"` and `"software_version": "unknown"` — a lowercase sentinel, never a daemon-localized string (the daemon's own version formatting is gettext-translated and is deliberately not surfaced here). `os_info` is the peer's *own* self-reported OS string (raw external data, not normalized by amuled) and is frequently empty, since most clients don't send it.
 
+`country_code` is the peer's ISO 3166-1 alpha-2 country code (lowercase, e.g. `"de"`), resolved server-side from the peer IP by the daemon's GeoIP database. It is an empty string when GeoIP is disabled or unsupported by the build, or when the IP does not resolve — render the flag and localized country name client-side from the code.
+
 **Errors:** `400 bad_request` (unknown filter token), `503 ec_unavailable`.
+
+---
+
+#### `GET /api/v0/clients/{ecid}`
+
+**Auth:** `GUEST`
+
+Returns the full detail object for a single peer — every field [`GET /clients`](#get-apiv0clients) returns for that peer, **plus** the detail-only fields below. `{ecid}` is the peer's `client_ecid` (the EC connection id). Bare object, no list envelope.
+
+`ecid`, not `user_hash`, is the resource key: not every peer has a hash (unidentified / some LowID / eDonkey peers expose an empty one), a hash is not unique among a peer's simultaneous connections, and it is unauthenticated unless the peer uses Secure Identification. `ecid` is always present and unique per live connection. Trade-off: `ecid` is reassigned when amuled restarts, so a detail URL is **not** stable across restarts — use the `user_hash` field for a durable reference.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://$HOST/api/v0/clients/4382"
+```
+
+```json
+{
+  "client_ecid": 4382,
+  "client_name": "AnonymousPeer",
+  "user_hash": "1f2e3a...",
+  "ip": "203.0.113.42",
+  "country_code": "de",
+  "port": 4662,
+  "software": "eMule",
+  "software_version": "0.50a",
+  "os_info": "Linux",
+  "upload_state": "uploading",
+  "download_state": "idle",
+  "ident_state": "verified",
+  "download_file_name": "",
+  "upload_file_hash": "8b54a3c20fae9e4b9f7e0c2c8c01b6b1",
+  "download_file_hash": "",
+  "xfer": { "up_session": 22000000, "down_session": 0, "up_total": 452000000, "down_total": 189000000 },
+  "upload_speed_bps": 22000,
+  "download_speed_bps": 0,
+  "queue_waiting_position": 0,
+  "remote_queue_rank": 0,
+  "score": 150,
+  "obfuscation_status": "obfuscated",
+  "friend_slot": false,
+  "user_id_hybrid": 3232238090,
+  "high_id": true,
+  "server_ip": "203.0.113.9",
+  "server_port": 4242,
+  "server_name": "eD2K Test Server",
+  "kad_port": 4672,
+  "source_origin": "kad",
+  "upload_file_name": "example-distribution.iso",
+  "available_parts": 42,
+  "mod_version": "",
+  "view_shared_disabled": false,
+  "is_friend": false,
+  "dl_up_modifier": 1.0,
+  "part_progress_percent": 87.5
+}
+```
+
+The detail fields mirror the desktop "Client Details" modal. `user_id_hybrid` is the peer's hybrid eD2k id; `high_id` is `true` for a HighID peer (id ≥ `0x1000000`) and `false` for LowID. `server_ip` / `server_port` / `server_name` describe the eD2k server the peer connects through (`server_ip` is `""` when unknown). `kad_port` is non-zero when the peer is reachable on Kad. `source_origin` is how the peer was discovered — `"server"` / `"kad"` / `"source_exchange"` / `"passive"` / `"link"` / `"source_seeds"` / `"search_result"`. `upload_file_name` is the partfile the peer is downloading **from us** — present only while we're uploading to them. `available_parts` is the count of parts the peer holds of the linked file; `mod_version` is the peer's client-mod string (often `""`); `view_shared_disabled` is `true` when the peer forbids browsing its shared files. `is_friend` is `true` when the peer is in your friends list (`CUpDownClient::IsFriend()`) — **distinct** from `friend_slot`, which is a *reserved upload slot* granted to a peer and can be set for non-friends. `dl_up_modifier` is the upload score modifier the GUI labels "DL/UP modifier" (`GetScoreRatio()`). `part_progress_percent` is the peer's completeness of the file we are downloading **from** them (`available_parts` over that file's part count) and is **omitted** when there is no linked download or the part count is unknown.
+
+> `is_friend` and `dl_up_modifier` ride two EC tags added for this endpoint. A webapi built against a newer core talking to an **older** amuled that doesn't send them degrades gracefully — `is_friend` reads `false` and `dl_up_modifier` reads `0`.
+
+**Errors:** `400 bad_request` (`{ecid}` is not a non-negative integer), `404 not_found` (no peer with that ecid in the current snapshot), `405 method_not_allowed` (non-GET), `503 ec_unavailable`.
 
 ---
 
@@ -897,13 +991,19 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://$HOST/api/v0/shared"
       "complete_sources": 12,
       "xfer":     { "session": 5242880,  "total": 314572800 },
       "requests": { "session": 42,       "total": 1837 },
-      "accepts":  { "session": 18,       "total": 921 }
+      "accepts":  { "session": 18,       "total": 921 },
+      "upload_speed_bps": 51200,
+      "uploading":        2,
+      "last_upload":      1700000500,
+      "shared_since":     1699000000
     }
   ]
 }
 ```
 
 `xfer.session` / `xfer.total` are bytes uploaded during the current amuled process vs over the file's lifetime. `requests` counts how many peers have asked for the file; `accepts` counts how many of those requests were granted an upload slot. The `session` counters reset on amuled restart; `total` is persisted in `known.met`.
+
+`upload_speed_bps` is the file's current combined upload rate in bytes/sec (summed over the peers it is uploading to), and `uploading` is how many peers it is actively uploading to right now — together the "is this file being seeded" signal, the upload-side analogue of the `/downloads` speed + transferring-source counts. Subtract `uploading` from the queued-client count (`queued_count`, on the detail view) to show `uploading / queued`. Both are live and refresh every tick. `last_upload` is the unix timestamp of the last time data was sent for the file, and `shared_since` is when the file was completed or first shared; both are persisted in `known.met` and are `0` when unknown — a file that has never uploaded, or a `known.met` entry written before these fields existed.
 
 `priority` is the upload priority — `"very_low"` / `"low"` / `"normal"` / `"high"` / `"release"` — and `priority_auto` is `true` when amuled is deriving that level automatically from the upload queue. This mirrors the `/downloads` shape (base `priority` + separate `priority_auto` flag); on an auto file `priority` reports the current derived level, not the literal string `"auto"`. For a file that is both downloading and shared this upload priority is independent of the download priority reported by [`GET /api/v0/downloads`](#get-apiv0downloads).
 
@@ -1009,6 +1109,7 @@ Send a bare priority level to pin it (the file's `priority_auto` becomes `false`
       "description": "Public server",
       "version": "17.15",
       "address": "203.0.113.5:4242",
+      "country_code": "de",
       "port": 4242,
       "users": 312000,
       "max_users": 500000,
@@ -1021,6 +1122,8 @@ Send a bare priority level to pin it (the file's `priority_auto` becomes `false`
   ]
 }
 ```
+
+`country_code` is the ISO 3166-1 alpha-2 code (lowercase, e.g. `"de"`) of the server host, resolved server-side from the server IP by the daemon's GeoIP database — same semantics and empty-string fallback as the peer `country_code` on `/clients`.
 
 **Errors:** `503 ec_unavailable`.
 
@@ -1158,6 +1261,8 @@ Deleting `index 0` is rejected by amuled (`400 amuled_rejected`).
 
 **Auth:** `GUEST`
 
+Returns every preference category amuled carries over EC. The `general` and `connection` sub-objects are the original common-case set; the remaining categories (issue #437, plus `ip2country` from #440) map 1:1 to the daemon's own settings and mirror the desktop "Preferences" tabs.
+
 ```json
 {
   "general": {
@@ -1169,6 +1274,8 @@ Deleting `index 0` is rejected by amuled (`400 amuled_rejected`).
   "connection": {
     "max_upload_kbps":   50,
     "max_download_kbps": 0,
+    "max_upload_cap_kbps":   0,
+    "max_download_cap_kbps": 0,
     "slot_allocation":   3,
     "tcp_port":          4662,
     "udp_port":          4672,
@@ -1178,10 +1285,89 @@ Deleting `index 0` is rejected by amuled (`400 amuled_rejected`).
     "autoconnect": true,
     "reconnect":   true,
     "network_ed2k": true,
-    "network_kad":  true
+    "network_kad":  true,
+    "bind_address": "",
+    "bind_interface": "",
+    "proxy_enabled": false,
+    "proxy_type": 0,
+    "proxy_host": "",
+    "proxy_port": 1080,
+    "proxy_auth": false,
+    "proxy_user": "",
+    "upnp_available": true,
+    "upnp_enabled": false,
+    "upnp_tcp_port": 50000
+  },
+  "directories": {
+    "incoming": "/home/me/.aMule/Incoming",
+    "temp":     "/home/me/.aMule/Temp",
+    "shared":   ["/home/me/media"],
+    "share_hidden":    false,
+    "auto_rescan":     true,
+    "follow_symlinks": false,
+    "exclude_patterns": "",
+    "exclude_regex":    false
+  },
+  "files": {
+    "ich_enabled": true, "aich_trust": false,
+    "new_paused": false, "new_auto_dl_prio": false, "new_auto_ul_prio": false,
+    "preview_prio": false, "start_next_paused": false, "resume_same_cat": false,
+    "save_sources": true, "extract_metadata": false, "alloc_full_size": false,
+    "check_free_space": true, "min_free_space_mb": 1, "create_normal": false,
+    "start_next_alphabetical": false,
+    "media_metadata_enabled": false, "ffprobe_path": ""
+  },
+  "servers": {
+    "remove_dead": true, "dead_server_retries": 3, "auto_update": false,
+    "add_from_server": true, "add_from_client": true, "use_score_system": true,
+    "smart_id_check": true, "safe_server_connect": false,
+    "autoconn_static_only": false, "manual_high_prio": false,
+    "update_url": "http://upd.emule-security.org/server.met"
+  },
+  "security": {
+    "can_see_shares": false,
+    "ipfilter_clients": true, "ipfilter_servers": true,
+    "ipfilter_auto_update": false, "ipfilter_update_url": "",
+    "ipfilter_level": 127, "ipfilter_filter_lan": true,
+    "use_secident": true,
+    "obfuscation_supported": true, "obfuscation_requested": true, "obfuscation_required": false,
+    "paranoid_filtering": true, "use_system_ipfilter": false
+  },
+  "message_filter": {
+    "enabled": false, "all": false, "friends": false,
+    "secure": false, "by_keyword": false, "keywords": ""
+  },
+  "remote_controls": {
+    "webserver_enabled": false, "webserver_port": 4711, "webserver_use_gzip": true,
+    "webserver_refresh": 120, "webserver_template": "",
+    "webserver_guest_enabled": false,
+    "amuleapi_enabled": true, "amuleapi_port": 4713, "amuleapi_bind": "0.0.0.0"
+  },
+  "online_signature": { "enabled": false, "directory": "/home/me/.aMule", "update_frequency": 5 },
+  "core_tweaks": {
+    "max_conn_per_five": 200, "verbose": false, "filebuffer": 240000,
+    "ul_queue": 5000, "srv_keepalive_timeout": 0, "kad_max_searches": 50,
+    "kad_reask_ms": 1800000, "source_reask_ms": 900000
+  },
+  "kademlia": { "update_url": "http://upd.emule-security.org/nodes.dat" },
+  "ip2country": {
+    "supported": true, "enabled": true, "source": "dbip",
+    "custom_url": "", "maxmind_license": "", "auto_update": true,
+    "loaded_source": "dbip", "db_path": "/home/me/.aMule/GeoIP/dbip.mmdb",
+    "db_loaded": true, "downloading": false, "last_result": "ok"
   }
 }
 ```
+
+Booleans are plain JSON `true`/`false` regardless of how amuled encodes them on the wire. **Passwords are never returned** — the webserver admin/guest and amuleapi passwords are write-only (see PATCH). `general.user_hash` is the node's own identity hash, not a password.
+
+`ip2country` is the GeoIP (IP-to-country) config category (issue #440). `supported` is a capability flag: `false` when the connected daemon is built without GeoIP — the config fields are then present but inert. `source` is one of `"dbip"` / `"maxmind"` / `"custom"` (the next-download database selector). `maxmind_license` is returned plainly (it is a config string the daemon already round-trips, not a masked password). `loaded_source`, `db_path`, `db_loaded`, `downloading`, and `last_result` are **read-only** live status (the currently loaded DB and any in-flight refresh); they are ignored if sent on PATCH.
+
+`files.media_metadata_enabled` / `files.ffprobe_path` control media-metadata extraction: when enabled, the daemon probes shared audio/video with `ffprobe` to advertise length/bitrate/codec. `ffprobe_path` is a **daemon-side** path — an empty string means the daemon auto-detects the binary. `connection.bind_address` (empty = bind to any local IP), `connection.bind_interface` (a daemon-side interface name such as `eth0` / `en0` / `tun0`; empty = any), and `online_signature.directory` are likewise daemon-side paths/addresses. These, together with `files.start_next_alphabetical`, `security.paranoid_filtering`, `security.use_system_ipfilter`, and `online_signature.update_frequency`, are ordinary daemon settings; a `bind_address` change takes effect on the next amuled restart.
+
+`connection.upnp_enabled` toggles UPnP router forwarding of the daemon's P2P ports — the ports themselves are `connection.tcp_port` (ed2k TCP) and `connection.udp_port` (ed2k/Kad UDP). `connection.upnp_tcp_port` is a separate optional knob: the fixed local port the UPnP control point (libupnp) binds to for the router's callbacks, `0` meaning auto-assign — **not** a forwarded port. `connection.upnp_available` is **read-only** — the daemon advertises whether it was built with UPnP (`false` on a core built `-DENABLE_UPNP=OFF`, where `upnp_enabled` has no effect); it is ignored if sent on PATCH. (Web-server and EC-port UPnP are intentionally not exposed — amuleweb is deprecated and the EC port is not a P2P port.)
+
+The `connection.proxy_*` fields configure the proxy the **daemon** routes its P2P and HTTP traffic through. `proxy_type` is `0` SOCKS5 / `1` SOCKS4 / `2` HTTP / `3` SOCKS4a; `proxy_auth` toggles username/password authentication. `proxy_password` is **write-only** — accepted on PATCH but never returned on GET (same as the `remote_controls` passwords); PATCH the other proxy fields without it to leave the stored password unchanged.
 
 **Errors:** `503 ec_unavailable`.
 
@@ -1189,15 +1375,21 @@ Deleting `index 0` is rejected by amuled (`400 amuled_rejected`).
 
 **Auth:** `ADMIN`
 
-Body shape mirrors the GET; every field is optional. Fields not present are left unchanged. Subset example:
+Body shape mirrors the GET; every sub-object and every field is optional, and fields not present are left unchanged. Subset example:
 
 ```json
-{ "connection": { "max_upload_kbps": 100 } }
+{ "files": { "new_paused": true }, "servers": { "dead_server_retries": 5 } }
 ```
 
-**Response:** `200 OK` — full preferences object (post-mutation).
+**Write-only passwords** (accepted here, never echoed on GET) live under `remote_controls`: `webserver_password`, `webserver_guest_password`, `amuleapi_password`. Send the plaintext — amuled stores the hash. `webserver_guest_password` requires that guest access be enabled (pass `webserver_guest_enabled: true` in the same request, or leave it already enabled).
 
-**Errors:** `400 bad_request`, `400 amuled_rejected`, `503 ec_unavailable`.
+**`ip2country`** accepts `enabled`, `source` (`"dbip"` / `"maxmind"` / `"custom"` — any other value is a `400`), `custom_url`, `maxmind_license`, and `auto_update`. It also accepts a **write-only** `update_now` boolean that triggers an immediate database download from the (just-applied) source; it is never echoed on GET. `supported` and the read-only status fields (`loaded_source`, `db_path`, `db_loaded`, `downloading`, `last_result`) are ignored if sent.
+
+> **Note:** these are the daemon's live settings — the same ones the desktop GUI edits. Some are self-affecting: changing `remote_controls.amuleapi_port` / `amuleapi_bind`, or `directories.incoming` / `temp`, alters the very daemon you are talking to. A port/bind change only takes effect on the next amuled restart, so it will not drop your current connection mid-request.
+
+**Response:** `200 OK` — full preferences object (post-mutation), so a read-modify-write client can confirm what landed without a follow-up GET.
+
+**Errors:** `400 bad_request` (unknown/mis-typed field, or a body with no recognized fields), `400 amuled_rejected`, `503 ec_unavailable`.
 
 ---
 
@@ -1480,7 +1672,12 @@ This endpoint does NOT busy-wait — it returns whatever amuled has in its resul
       "already_have": false,
       "rating":       0,
       "status":       "new",
-      "type":         "videos"
+      "type":         "videos",
+      "media":        { "length_s": 5400, "bitrate": 1500, "codec": "h264", "artist": "", "album": "", "title": "" },
+      "children": [
+        { "ecid": 621, "name": "example-distribution-26.04.iso", "hash": "8b54a3c2...", "sources": { "total": 40, "complete": 22 } },
+        { "ecid": 622, "name": "example_distro_2604_amd64.iso",  "hash": "8b54a3c2...", "sources": { "total": 10, "complete":  3 } }
+      ]
     }
   ],
   "progress": {
@@ -1491,7 +1688,9 @@ This endpoint does NOT busy-wait — it returns whatever amuled has in its resul
 }
 ```
 
-Each result carries `sources` as a nested `{total, complete}` object — `total` is the swarm size amuled reports and `complete` is how many of those hold the file complete. `already_have` is `true` when you are currently downloading the file or already have it completed/shared; it is `false` for a fresh result and for one you have canceled/removed (a canceled result is re-downloadable, so it does not read as held). `rating` is amuled's aggregated quality rating (`0` when unrated). `status` is this result's download status on your node — `"new"` / `"downloaded"` / `"queued"` / `"canceled"` / `"queued_canceled"`. `type` is the file-type token derived from the filename extension (same tokens as the shared-detail [`file_type`](#get-apiv0sharedhash), e.g. `"videos"` / `"audio"`; `""` when the name has no extension).
+Each result carries `sources` as a nested `{total, complete}` object — `total` is the swarm size amuled reports and `complete` is how many of those hold the file complete. `already_have` is `true` when you are currently downloading the file or already have it completed/shared; it is `false` for a fresh result and for one you have canceled/removed (a canceled result is re-downloadable, so it does not read as held). `rating` is amuled's aggregated quality rating (`0` when unrated). `status` is this result's download status on your node — `"new"` / `"downloaded"` / `"queued"` / `"canceled"` / `"queued_canceled"`. `type` is the file-type token derived from the filename extension (same tokens as the shared-detail [`file_type`](#get-apiv0sharedhash), e.g. `"videos"` / `"audio"`; `""` when the name has no extension). `media` is the audio/video [media metadata](#media-metadata) object (same shape as the file-detail endpoints) — **present only** for a hit that is already known/probed locally, and **omitted entirely** for remote hits with no metadata (most global/Kad results), matching the blank Length/Bitrate/Codec columns in the desktop search list.
+
+`children` (issue #431) is the result-grouping tree: amuled collapses hits that are the **same file** (same ed2k hash **and** size) but advertised under **different filenames** into one parent row, and `children[]` holds the alternative names. Each child carries the parent's `hash` (that's why they group), its own `sources`, and a distinct `ecid` — pass that `ecid` to [`POST /search/results/{hash}/download`](#post-apiv0searchresultshashdownload) to download the file **under that chosen filename**. `children` is always present and is an empty array for a hit seen under a single name. The top-level `results[]` contains parents only — a child never appears as its own top-level entry.
 
 The `progress` object carries the same `state` / `kind` / `percent` fields as the [`search_progress`](EVENTS.md#search_progress) SSE event, so REST pollers and stream consumers interpret progress identically. (The event additionally carries a `results` count, since — unlike this response — it has no `results` array beside it.)
 
@@ -1519,7 +1718,7 @@ Cancels the in-flight search; cached results stay.
 
 Promote a search result into the transfer queue. Equivalent to clicking "Download" on a desktop search row.
 
-**Body:** `{ "category": 0 }` (optional).
+**Body:** `{ "category": 0, "ecid": 621 }` — both optional. `category` is the download category (default `0`). `ecid` (issue #431) selects one grouped **child** by its `results[].children[].ecid`, so the file downloads **under that child's filename**; omit it to download the parent (the aggregated/highest-source name). Since grouped children share the parent's hash, `{hash}` alone can't disambiguate them — `ecid` is how you pick a specific advertised name.
 
 **Response:** `202 Accepted` → `{ "ok": true, "hash": "...", "category": 0 }`.
 

@@ -78,6 +78,8 @@
 
 #include "kademlia/kademlia/Kademlia.h"
 #include "kademlia/kademlia/Search.h"
+#include "kademlia/kademlia/Entry.h"   // Needed for Kademlia::CEntry (Kad notes)
+#include "kademlia/kademlia/Indexed.h" // Needed for CKadEntryPtrList
 
 SFileRating::SFileRating(const wxString &u, const wxString &f, sint16 r, const wxString &c)
 : UserName(u)
@@ -2356,6 +2358,13 @@ void CPartFile::CompleteFileEnded(bool errorOccured, const CPath &newname)
 		m_paused = false;
 		ClearPriority();
 
+		// Shared-since (issue #466): a just-completed download becomes
+		// available now. Stamp only if unset so a re-complete / re-add
+		// doesn't move the date.
+		if (GetDateShared() == 0) {
+			SetDateShared(time(nullptr));
+		}
+
 		// Remove from list of canceled files in case it was canceled once upon a time
 		if (theApp->canceledfiles->Remove(GetFileHash())) {
 			theApp->canceledfiles->Save();
@@ -4038,7 +4047,7 @@ void CPartFile::AICHRecoveryDataAvailable(uint16 nPart)
 		return;
 	}
 
-	// now compare the hash we just did, to the verified hash and readd all blocks which are ok
+	// now compare the hash we just did, to the verified hash and read all blocks which are ok
 	uint32 nRecovered = 0;
 	for (uint32 pos = 0; pos < length; pos += EMBLOCKSIZE) {
 		const uint32 nBlockSize = min<uint32>(EMBLOCKSIZE, length - pos);
@@ -4210,6 +4219,20 @@ void CPartFile::GetRatingAndComments(FileRatingList &list) const
 			// AddDebugLogLineN(logPartFile, wxString("found a comment for ") << GetFileName());
 			list.push_back(SFileRating(*cur_src));
 		}
+	}
+
+	// Append community ratings/comments retrieved on demand from Kad (one entry per
+	// responding node). These are stored by CSearch::ProcessResultNotes -> AddNote.
+	const CKadEntryPtrList &notes = getNotes();
+	for (Kademlia::CEntry *entry : notes) {
+		uint64_t rating = 0;
+		entry->GetIntTagValue(TAG_FILERATING, rating);
+		wxString comment = entry->GetStrTagValue(TAG_DESCRIPTION);
+		if (comment.IsEmpty() && rating == 0) {
+			continue;
+		}
+		wxString userName = entry->m_uIP ? Uint32toStringIP(entry->m_uIP) : wxString(_("Kad user"));
+		list.emplace_back(userName, entry->GetCommonFileName(), (sint16)rating, comment);
 	}
 }
 

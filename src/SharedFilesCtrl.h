@@ -53,6 +53,11 @@ public:
 	/** Reloads the list of shared files. */
 	void ShowFileList();
 
+	// Bracket a reconnect resync (issue #444) so the list repaints once
+	// (Freeze) and sorts once at the end rather than per updated/added row.
+	void BeginBatchUpdate();
+	void EndBatchUpdate();
+
 	/**
 	 * Adds the specified file to the list, updating filecount and more.
 	 *
@@ -189,6 +194,10 @@ private:
 	 * Adds links in a collection to transfers
 	 */
 	void OnAddCollection(wxCommandEvent &WXUNUSED(evt));
+
+#ifndef CLIENT_GUI
+	void OnVerifyLocalData(wxCommandEvent &WXUNUSED(evt));
+#endif
 
 	//! Pointer used to ensure that the menu isn't displayed twice.
 	wxMenu *m_menu;

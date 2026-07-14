@@ -1,8 +1,7 @@
-// Downloads view: downloads queue (with actions) + bottom Peers panel.
+// Downloads view: downloads queue (with actions).
 // Mirrors the aMule desktop "Downloads" page: category tabs, status filter,
 // multi-select, column sorting, per-row pause/resume/priority/category/cancel,
-// bulk actions, clear-completed, live totals, an ed2k adder for mobile, and a
-// bottom Peers panel (see peers.js).
+// bulk actions, clear-completed, live totals, and an ed2k adder for mobile.
 
 import { api, bulkFailures } from "../api.js";
 import { data } from "../events.js";
@@ -13,7 +12,8 @@ import { formatBytes, formatSpeed } from "../format.js";
 import { Icon } from "../icons.js";
 import { t, tn, terr } from "../i18n.js";
 import { CategoriesPanel } from "./categories.js";
-import { PeersPanel } from "./peers.js";
+import { DownloadDetail } from "./download-detail.js";
+import { SplitDetail } from "./split-detail.js";
 
 const PRIORITIES = ["auto", "low", "normal", "high"]
   .map((v) => [v, t("downloads_prio_" + v)]);
@@ -30,6 +30,14 @@ export default function Downloads({ isGuest }) {
   const [filterCategory, setFilterCategory] = useState("all");
   const [filterText, setFilterText] = useState("");
   const [manageCats, setManageCats] = useState(false);
+  const [detailHash, setDetailHash] = useState(null); // row shown in the detail panel
+
+  // Open (or toggle closed) the detail panel; ignore clicks landing on a row's
+  // own controls (checkbox / priority / category / action buttons).
+  const onRowClick = (d, e) => {
+    if (e.target.closest("input,select,button,a")) return;
+    setDetailHash((h) => (h === d.hash ? null : d.hash));
+  };
 
   const loadCategories = () =>
     api.get("categories").then((r) => setCategories(r.categories || [])).catch(() => {});
@@ -49,6 +57,11 @@ export default function Downloads({ isGuest }) {
       setFilterCategory("all");
     }
   }, [categories]);
+
+  // Close the detail panel if its download leaves the queue (cancelled/cleared).
+  useEffect(() => {
+    if (detailHash && !downloads.some((d) => d.hash === detailHash)) setDetailHash(null);
+  }, [downloads]);
 
   const categoryName = (idx) => {
     if (idx === 0) return "—"; // category 0 = no category assigned
@@ -194,7 +207,8 @@ export default function Downloads({ isGuest }) {
   ];
 
   list = sortRows(list, columns, sortKey, sortDir);
-  const rowClass = (d) => selection.has(d.hash) ? "row-selected" : "";
+  const rowClass = (d) =>
+    (selection.has(d.hash) ? "row-selected " : "") + (d.hash === detailHash ? "row-active" : "");
 
   let size = 0, done = 0, speed = 0;
   for (const d of list) { size += d.size || 0; done += d.size_done || 0; speed += d.speed_bps || 0; }
@@ -208,6 +222,7 @@ export default function Downloads({ isGuest }) {
   ];
 
   return html`
+    <div class="split-view">
     <div class="view-header">
       <h3 class="section-title">${t("downloads_download")}</h3>
       <div class="spacer"></div>
@@ -223,7 +238,10 @@ export default function Downloads({ isGuest }) {
 
     ${manageCats
       ? html`<${CategoriesPanel} isGuest=${isGuest} />`
-      : html`<section class="net-pane">
+      : html`<${SplitDetail} storageKey="dl_detail_height" open=${!!detailHash}
+                      onClose=${() => setDetailHash(null)}
+                      top=${html`
+      <section class="net-pane">
       <${Tabs} tabs=${categoryTabs} active=${filterCategory}
                onSelect=${(k) => setFilterCategory(k)} />
       <div class="net-pane-body">
@@ -257,17 +275,18 @@ export default function Downloads({ isGuest }) {
         </div>
       </div>
 
-      <${VirtualTable} columns=${columns} rows=${list} rowKey=${(d) => d.hash} rowClass=${rowClass}
-                       sortKey=${sortKey} sortDir=${sortDir} onSort=${toggleSort}
-                       empty=${html`<${Placeholder} kind="info">${t("downloads_empty")}<//>`} />
-
-      <div class="totals-line">
-        <span>${tn("downloads_files_count", list.length)}</span>${" · "}<span>${t("downloads_size")} ${formatBytes(size)}</span>${" · "}<span>${t("downloads_col_done")} ${formatBytes(done)}</span>${" · "}<span>${t("downloads_speed")} ${formatSpeed(speed)}</span>
+        <${VirtualTable} columns=${columns} rows=${list} rowKey=${(d) => d.hash} rowClass=${rowClass}
+                         sortKey=${sortKey} sortDir=${sortDir} onSort=${toggleSort} onRowClick=${onRowClick}
+                         maxHeight="none"
+                         empty=${html`<${Placeholder} kind="info">${t("downloads_empty")}<//>`} />
+        <div class="totals-line">
+          <span>${tn("downloads_files_count", list.length)}</span>${" · "}<span>${t("downloads_size")} ${formatBytes(size)}</span>${" · "}<span>${t("downloads_col_done")} ${formatBytes(done)}</span>${" · "}<span>${t("downloads_speed")} ${formatSpeed(speed)}</span>
+        </div>
       </div>
-      </div>
-    </section>`}
-
-    <${PeersPanel} />`;
+    </section>`}>
+        <${DownloadDetail} hash=${detailHash} />
+      <//>`}
+    </div>`;
 }
 
 // --- helpers ------------------------------------------------------------

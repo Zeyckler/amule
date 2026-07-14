@@ -217,9 +217,33 @@ void CDownloadListCtrl::AddFile(CPartFile *file, bool deferView)
 			if (file->IsCompleted()) {
 				CastByID(ID_BTNCLRCOMPL, GetParent(), wxButton)->Enable(true);
 			}
-			SortList();
+			// During a batch update (a reconnect resync — issue #444) the
+			// row is still appended, but the per-item sort is deferred to
+			// EndBatchUpdate()'s single SortList() so a large add stays
+			// O(n log n) instead of O(n^2).
+			if (!m_batchUpdate) {
+				SortList();
+			}
 		}
 	}
+}
+
+void CDownloadListCtrl::BeginBatchUpdate()
+{
+	// Coalesce a burst of AddFile()/UpdateItem() calls into a single
+	// repaint (Freeze) and suppress the per-item SortList; EndBatchUpdate()
+	// sorts once. Used when reconciling the whole list against a fresh
+	// server snapshot after a reconnect (issue #444) — a 10k library would
+	// otherwise pay 10k row repaints + O(n^2) sorts.
+	Freeze();
+	m_batchUpdate = true;
+}
+
+void CDownloadListCtrl::EndBatchUpdate()
+{
+	m_batchUpdate = false;
+	SortList();
+	Thaw();
 }
 
 void CDownloadListCtrl::ShowFileList()
@@ -765,7 +789,10 @@ void CDownloadListCtrl::OnMouseRightClick(wxListEvent &evt)
 
 	FileRatingList ratingList;
 	item->GetFile()->GetRatingAndComments(ratingList);
-	m_menu->Enable(MP_VIEWFILECOMMENTS, !ratingList.empty());
+	// Enable when there are source comments to show, or when Kad is connected so
+	// the dialog's "Get from Kad" lookup can retrieve community notes (#434) even
+	// for a file that has no per-source comments yet.
+	m_menu->Enable(MP_VIEWFILECOMMENTS, !ratingList.empty() || theApp->IsConnectedKad());
 
 	m_menu->Check(MP_SWAP_A4AF_TO_THIS_AUTO, file->IsA4AFAuto());
 

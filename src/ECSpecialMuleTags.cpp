@@ -29,6 +29,7 @@
 #include "config.h" // Needed for ENABLE_VERSION_CHECK
 #include "Preferences.h"
 #include "amule.h"
+#include "IP2Country.h"     // For CIP2Country status (#440 remote GeoIP config)
 #include "SharedFileList.h" // for EnableDirectoryWatcher on the apply path
 
 CEC_Category_Tag::CEC_Category_Tag(uint32 cat_index, EC_DETAIL_LEVEL detail_level)
@@ -119,6 +120,15 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		const bool versionCheckAvailable = false;
 #endif
 		user_prefs.AddTag(CECTag(EC_TAG_GENERAL_VERSION_CHECK_AVAILABLE, versionCheckAvailable));
+		// Capability signal: whether this build can do UPnP port forwarding
+		// (ENABLE_UPNP). The remote GUI greys the P2P-UPnP controls when the
+		// core can't forward, instead of offering a dead toggle.
+#ifdef ENABLE_UPNP
+		const bool upnpAvailable = true;
+#else
+		const bool upnpAvailable = false;
+#endif
+		user_prefs.AddTag(CECTag(EC_TAG_GENERAL_UPNP_AVAILABLE, upnpAvailable));
 		AddTag(user_prefs);
 	}
 
@@ -148,6 +158,27 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		if (thePrefs::GetNetworkKademlia()) {
 			connPrefs.AddTag(CECEmptyTag(EC_TAG_NETWORK_KADEMLIA));
 		}
+		connPrefs.AddTag(CECTag(EC_TAG_CONN_BIND_ADDRESS, thePrefs::GetAddress()));
+		connPrefs.AddTag(CECTag(EC_TAG_CONN_BIND_INTERFACE, thePrefs::GetNetworkInterface()));
+		// Proxy: the daemon routes P2P + its HTTP fetches through this; the
+		// remote GUI must be able to read + set it. The password rides plainly
+		// (it is a plaintext auth credential, not a hash) so amulegui can show
+		// it -- the amuleapi surface keeps it write-only.
+		const CProxyData *proxy = thePrefs::GetProxyData();
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_ENABLE, proxy->m_proxyEnable));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_TYPE, static_cast<uint32>(proxy->m_proxyType)));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_HOST, proxy->m_proxyHostName));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_PORT, static_cast<uint16>(proxy->m_proxyPort)));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_AUTH, proxy->m_enablePassword));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_USER, proxy->m_userName));
+		connPrefs.AddTag(CECTag(EC_TAG_PROXY_PASSWORD, proxy->m_password));
+		// UPnP: the enable toggle forwards the P2P ports (which are the
+		// tcp_port/udp_port tags above); UPnPTCPPort is the control point's own
+		// local port (libupnp), not a forwarded port. Web-server and EC-port
+		// UPnP are intentionally not carried (amuleweb is deprecated; the EC
+		// port is not a P2P port).
+		connPrefs.AddTag(CECTag(EC_TAG_CONN_UPNP_ENABLED, thePrefs::GetUPnPEnabled()));
+		connPrefs.AddTag(CECTag(EC_TAG_CONN_UPNP_TCP_PORT, thePrefs::GetUPnPTCPPort()));
 		AddTag(connPrefs);
 	}
 
@@ -215,6 +246,8 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		if (thePrefs::IsOnlineSignatureEnabled()) {
 			online_sig.AddTag(CECEmptyTag(EC_TAG_ONLINESIG_ENABLED));
 		}
+		online_sig.AddTag(CECTag(EC_TAG_ONLINESIG_DIRECTORY, thePrefs::GetOSDir().GetRaw()));
+		online_sig.AddTag(CECTag(EC_TAG_ONLINESIG_UPDATE, thePrefs::GetOSUpdate()));
 		AddTag(online_sig);
 	}
 
@@ -299,6 +332,14 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		if (!thePrefs::CreateFilesSparse()) {
 			filePrefs.AddTag(CECEmptyTag(EC_TAG_FILES_CREATE_NORMAL));
 		}
+		if (thePrefs::GetMediaMetadataEnabled()) {
+			filePrefs.AddTag(CECEmptyTag(EC_TAG_FILES_MEDIA_METADATA_ENABLED));
+		}
+		filePrefs.AddTag(
+			CECTag(EC_TAG_FILES_MEDIA_FFPROBE_PATH, thePrefs::GetMediaMetadataFFProbePath()));
+		if (thePrefs::StartNextFileAlpha()) {
+			filePrefs.AddTag(CECEmptyTag(EC_TAG_FILES_START_NEXT_ALPHA));
+		}
 		AddTag(filePrefs);
 	}
 
@@ -357,6 +398,12 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		if (thePrefs::IsClientCryptLayerRequired()) {
 			secPrefs.AddTag(CECEmptyTag(EC_TAG_SECURITY_OBFUSCATION_REQUIRED));
 		}
+		if (thePrefs::ParanoidFilter()) {
+			secPrefs.AddTag(CECEmptyTag(EC_TAG_IPFILTER_PARANOID));
+		}
+		if (thePrefs::UseIPFilterSystem()) {
+			secPrefs.AddTag(CECEmptyTag(EC_TAG_IPFILTER_SYSTEM));
+		}
 
 		AddTag(secPrefs);
 	}
@@ -381,6 +428,53 @@ CEC_Prefs_Packet::CEC_Prefs_Packet(
 		CECEmptyTag kadPrefs(EC_TAG_PREFS_KADEMLIA);
 		kadPrefs.AddTag(CECTag(EC_TAG_KADEMLIA_UPDATE_URL, thePrefs::GetKadNodesUrl()));
 		AddTag(kadPrefs);
+	}
+
+	if (selection & EC_PREFS_IP2COUNTRY) {
+		CECEmptyTag ip2cPrefs(EC_TAG_PREFS_IP2COUNTRY);
+		// SUPPORTED tells a remote GUI whether *this* build has GeoIP compiled
+		// in at all (the daemon may be built without libmaxminddb). amulegui
+		// gates its whole GeoIP config panel on this. The settings below are
+		// plain prefs and always sent so the panel can populate; ignored by a
+		// GeoIP-less daemon on apply.
+#ifdef GEOIP_GUI
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_SUPPORTED, true));
+#else
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_SUPPORTED, false));
+#endif
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_ENABLED, thePrefs::IsGeoIPEnabled()));
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_SOURCE, (uint8)thePrefs::GetGeoIPSource()));
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_CUSTOM_URL, thePrefs::GetGeoIPCustomUrl()));
+		ip2cPrefs.AddTag(
+			CECTag(EC_TAG_IP2COUNTRY_MAXMIND_LICENSE, thePrefs::GetGeoIPMaxMindLicense()));
+		ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_AUTO_UPDATE, thePrefs::IsGeoIPAutoUpdate()));
+		// Read-only live status, filled only where a resolver exists (the
+		// daemon / monolithic amule) so a remote GUI can render the status line
+		// and disable buttons while a refresh runs (#440 remote config). NULL
+		// on amulegui, which has no local resolver and only receives these.
+#ifndef CLIENT_GUI
+		// Resolver-owning builds (daemon / monolithic) only. amulegui has no
+		// CIP2Country instance (GetIP2Country() is always NULL there) and doesn't
+		// link the resolver, so referencing its out-of-line methods here would
+		// break the amulegui link. The live status flows the other way for
+		// amulegui — it *receives* these tags in Apply().
+		if (CIP2Country *ip2c = theApp->GetIP2Country()) {
+			ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_DB_PATH, ip2c->GetDatabasePath()));
+			ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_DB_LOADED, ip2c->IsEnabled()));
+			ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_DOWNLOADING, ip2c->IsDownloading()));
+			ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_LAST_RESULT, ip2c->GetLastResult()));
+			ip2cPrefs.AddTag(
+				CECTag(EC_TAG_IP2COUNTRY_LOADED_SOURCE, thePrefs::GetGeoIPLoadedSource()));
+		}
+#endif
+		// Transient "Update now" trigger set by amulegui's prefs panel (which has
+		// no local resolver). Carried on the outgoing prefs packet so the daemon's
+		// Apply() kicks off a manual refresh. Only ever set on amulegui; the
+		// daemon never requests it, so its own outbound prefs never emit the tag.
+		if (thePrefs::IsGeoIPUpdateRequested()) {
+			ip2cPrefs.AddTag(CECTag(EC_TAG_IP2COUNTRY_UPDATE_NOW, true));
+		}
+		AddTag(ip2cPrefs);
 	}
 }
 
@@ -439,6 +533,13 @@ void CEC_Prefs_Packet::Apply() const
 		} else {
 			thePrefs::SetVersionCheckAvailable(true);
 		}
+		// A pre-3.1 daemon omits this tag; treat "absent" as no UPnP so the
+		// controls stay disabled rather than dead (only explicit true enables).
+		if (const CECTag *up = thisTab->GetTagByName(EC_TAG_GENERAL_UPNP_AVAILABLE)) {
+			thePrefs::SetUPnPAvailable(up->GetInt() != 0);
+		} else {
+			thePrefs::SetUPnPAvailable(false);
+		}
 #endif
 	}
 
@@ -480,6 +581,54 @@ void CEC_Prefs_Packet::Apply() const
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetReconnect, EC_TAG_CONN_RECONNECT);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetNetworkED2K, EC_TAG_NETWORK_ED2K);
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetNetworkKademlia, EC_TAG_NETWORK_KADEMLIA);
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_CONN_BIND_ADDRESS)) != nullptr) {
+			thePrefs::SetAddress(oneTag->GetStringData());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_CONN_BIND_INTERFACE)) != nullptr) {
+			thePrefs::SetNetworkInterface(oneTag->GetStringData());
+		}
+		// Proxy is a compound value; start from the current config and overwrite
+		// only the fields the packet actually carried (a partial PATCH leaves the
+		// rest -- notably the write-only password -- untouched).
+		CProxyData proxy = *thePrefs::GetProxyData();
+		bool proxySet = false;
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_ENABLE)) != nullptr) {
+			proxy.m_proxyEnable = oneTag->GetInt() != 0;
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_TYPE)) != nullptr) {
+			proxy.m_proxyType = static_cast<CProxyType>(oneTag->GetInt());
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_HOST)) != nullptr) {
+			proxy.m_proxyHostName = oneTag->GetStringData();
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_PORT)) != nullptr) {
+			proxy.m_proxyPort = static_cast<unsigned short>(oneTag->GetInt());
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_AUTH)) != nullptr) {
+			proxy.m_enablePassword = oneTag->GetInt() != 0;
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_USER)) != nullptr) {
+			proxy.m_userName = oneTag->GetStringData();
+			proxySet = true;
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_PROXY_PASSWORD)) != nullptr) {
+			proxy.m_password = oneTag->GetStringData();
+			proxySet = true;
+		}
+		if (proxySet) {
+			thePrefs::SetProxyData(proxy);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_CONN_UPNP_ENABLED)) != nullptr) {
+			thePrefs::SetUPnPEnabled(oneTag->GetInt() != 0);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_CONN_UPNP_TCP_PORT)) != nullptr) {
+			thePrefs::SetUPnPTCPPort(static_cast<uint16>(oneTag->GetInt()));
+		}
 	}
 
 	if ((thisTab = GetTagByName(EC_TAG_PREFS_MESSAGEFILTER)) != NULL) {
@@ -529,6 +678,12 @@ void CEC_Prefs_Packet::Apply() const
 
 	if ((thisTab = GetTagByName(EC_TAG_PREFS_ONLINESIG)) != NULL) {
 		ApplyBoolean(use_tag, thisTab, thePrefs::SetOnlineSignatureEnabled, EC_TAG_ONLINESIG_ENABLED);
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_ONLINESIG_DIRECTORY)) != nullptr) {
+			thePrefs::SetOSDir(CPath(oneTag->GetStringData()));
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_ONLINESIG_UPDATE)) != nullptr) {
+			thePrefs::SetOSUpdate(oneTag->GetInt());
+		}
 	}
 
 	if ((thisTab = GetTagByName(EC_TAG_PREFS_SERVERS)) != NULL) {
@@ -577,6 +732,15 @@ void CEC_Prefs_Packet::Apply() const
 			thePrefs::SetMinFreeDiskSpaceMB(oneTag->GetInt());
 		}
 		ApplyBoolean(use_tag, thisTab, thePrefs::CreateFilesNormal, EC_TAG_FILES_CREATE_NORMAL);
+		ApplyBoolean(use_tag,
+			thisTab,
+			thePrefs::SetMediaMetadataEnabled,
+			EC_TAG_FILES_MEDIA_METADATA_ENABLED);
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_FILES_MEDIA_FFPROBE_PATH)) != nullptr) {
+			thePrefs::SetMediaMetadataFFProbePath(oneTag->GetStringData());
+		}
+		ApplyBoolean(
+			use_tag, thisTab, thePrefs::SetStartNextFileAlpha, EC_TAG_FILES_START_NEXT_ALPHA);
 	}
 
 	if ((thisTab = GetTagByName(EC_TAG_PREFS_DIRECTORIES)) != NULL) {
@@ -672,6 +836,8 @@ void CEC_Prefs_Packet::Apply() const
 			thisTab,
 			thePrefs::SetClientCryptLayerRequired,
 			EC_TAG_SECURITY_OBFUSCATION_REQUIRED);
+		ApplyBoolean(use_tag, thisTab, thePrefs::SetParanoidFilter, EC_TAG_IPFILTER_PARANOID);
+		ApplyBoolean(use_tag, thisTab, thePrefs::SetIPFilterSystem, EC_TAG_IPFILTER_SYSTEM);
 	}
 
 	if ((thisTab = GetTagByName(EC_TAG_PREFS_CORETWEAKS)) != NULL) {
@@ -703,6 +869,70 @@ void CEC_Prefs_Packet::Apply() const
 		if ((oneTag = thisTab->GetTagByName(EC_TAG_KADEMLIA_UPDATE_URL)) != NULL) {
 			thePrefs::SetKadNodesUrl(oneTag->GetStringData());
 		}
+	}
+
+	if ((thisTab = GetTagByName(EC_TAG_PREFS_IP2COUNTRY)) != nullptr) {
+		// SUPPORTED is the core's capability flag, flowing daemon → GUI only:
+		// amulegui records it to show/hide its GeoIP page. The daemon must NOT
+		// apply an incoming SUPPORTED (an amulegui SET carries the GUI's own
+		// value, which would clobber the daemon's real capability), so this is
+		// CLIENT_GUI-only.
+#ifdef CLIENT_GUI
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_SUPPORTED)) != nullptr) {
+			thePrefs::SetGeoIPSupported(oneTag->GetInt() != 0);
+		}
+#endif
+		// Read-only live status mirrored for amulegui's panel (the daemon fills
+		// these; it sets-but-ignores its own copy — it reads its live resolver).
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_DB_LOADED)) != nullptr) {
+			thePrefs::SetGeoIPStatusLoaded(oneTag->GetInt() != 0);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_DOWNLOADING)) != nullptr) {
+			thePrefs::SetGeoIPStatusDownloading(oneTag->GetInt() != 0);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_LAST_RESULT)) != nullptr) {
+			thePrefs::SetGeoIPStatusLastResult(oneTag->GetStringData());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_LOADED_SOURCE)) != nullptr) {
+			thePrefs::SetGeoIPStatusLoadedSource(oneTag->GetStringData());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_ENABLED)) != nullptr) {
+			thePrefs::SetGeoIPEnabled(oneTag->GetInt() != 0);
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_SOURCE)) != nullptr) {
+			thePrefs::SetGeoIPSource((CPreferences::GeoIPSource)oneTag->GetInt());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_CUSTOM_URL)) != nullptr) {
+			thePrefs::SetGeoIPCustomUrl(oneTag->GetStringData());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_MAXMIND_LICENSE)) != nullptr) {
+			thePrefs::SetGeoIPMaxMindLicense(oneTag->GetStringData());
+		}
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_AUTO_UPDATE)) != nullptr) {
+			thePrefs::SetGeoIPAutoUpdate(oneTag->GetInt() != 0);
+		}
+		// Apply live: on the daemon this (re)creates / enables / disables the
+		// resolver for the new settings. No-op on amulegui (no local resolver),
+		// which merely absorbs the daemon's settings into its prefs for display.
+		// Remote prefs-apply: do NOT auto-download here. An explicit "Update now"
+		// (UPDATE_NOW below) carries that intent; otherwise every amulegui OK
+		// would fetch, and together with UPDATE_NOW it fires twice.
+		theApp->EnableIP2Country(false);
+#ifndef CLIENT_GUI
+		// Explicit "Update now" trigger from a remote GUI (#440): re-download the
+		// DB from the (just-applied) source. Daemon / monolithic only — amulegui
+		// sends this tag but never receives it, and doesn't link the resolver, so
+		// the CIP2Country::Update reference is guarded out of the amulegui build.
+		if ((oneTag = thisTab->GetTagByName(EC_TAG_IP2COUNTRY_UPDATE_NOW)) != nullptr &&
+			oneTag->GetInt() != 0) {
+			if (theApp->GetIP2Country()) {
+				// Remote trigger: no progress dialog (showProgress=false) — the
+				// requesting amulegui can't render EC download progress, and on a
+				// monolithic-app-as-backend the dialog would pop on the core.
+				theApp->GetIP2Country()->Update(true, false);
+			}
+		}
+#endif
 	}
 
 	theApp->glob_prefs->Save();

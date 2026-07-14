@@ -182,6 +182,26 @@ static bool IsWANRelatedDeviceType(const std::string &type)
 	return false;
 }
 
+// Case-insensitive match of a device/service type URN against a
+// fully-versioned reference URN, ignoring the trailing ":<version>"
+// component. IGD:2 gateways advertise their embedded devices and services
+// with a ":2" suffix (e.g. "urn:schemas-upnp-org:service:WANIPConnection:2"),
+// so classifying by an exact ":1" string would skip them even though
+// libupnp's version-tolerant M-SEARCH still reaches the device. We keep the
+// fully-versioned constants — they double as the M-SEARCH target, which must
+// carry a version — and strip the tail only for classification, prefix-
+// matching on the reference through its final ':'. The trailing ':' is
+// retained in the prefix so "WANIPConnection:" cannot match, e.g.,
+// "WANIPConnectionFoo:1".
+static bool TypeMatchesIgnoringVersion(const std::string &type, const std::string &reference)
+{
+	std::string::size_type lastColon = reference.find_last_of(':');
+	if (lastColon == std::string::npos) {
+		return stdStringIsEqualCI(type, reference);
+	}
+	return stdStringStartsWithCI(type, reference.substr(0, lastColon + 1));
+}
+
 static std::string ProcessErrorMessage(
 	const std::string &message, int errorCode, const DOMString errorString, IXML_Document *doc)
 {
@@ -491,8 +511,8 @@ CUPnPService::CUPnPService(
 	    << "\n        absEventSubURL: " << m_absEventSubURL;
 	AddDebugLogLineN(logUPnP, msg);
 
-	if (m_serviceType == UPnP::Service::WAN_IP_Connection ||
-		m_serviceType == UPnP::Service::WAN_PPP_Connection) {
+	if (UPnP::TypeMatchesIgnoringVersion(m_serviceType, UPnP::Service::WAN_IP_Connection) ||
+		UPnP::TypeMatchesIgnoringVersion(m_serviceType, UPnP::Service::WAN_PPP_Connection)) {
 #if 0
 	    m_serviceType == UPnP::Service::WAN_PPP_Connection ||
 	    m_serviceType == UPnP::Service::WAN_Common_Interface_Config ||
@@ -777,6 +797,25 @@ CUPnPControlPoint::CUPnPControlPoint(unsigned short udpPort)
 	msg << "bound to " << ipAddress << ":" << port << ".";
 	AddDebugLogLineN(logUPnP, msg);
 	msg.str("");
+
+	// Raise the SDK's incoming content-length ceiling above libupnp's
+	// 16 KB default (DEFAULT_SOAP_CONTENT_LENGTH). Some gateways serve an
+	// SCPD/description XML slightly larger than that, which makes the
+	// blocking UpnpDownloadXmlDoc in Subscribe() fail with
+	// UPNP_E_OUTOF_BOUNDS ("Error getting SCPD Document") — the service
+	// never registers, so no port mapping happens and the user is stuck on
+	// a LowID (observed on ZTE and Sagemcom routers). 1 MB clears any real
+	// router descriptor while still bounding what a hostile LAN device can
+	// push into a blocking fetch. Must run after UpnpInit2 succeeds: the
+	// call is a no-op (UPNP_E_FINISH) until the SDK is initialised.
+	ret = UpnpSetMaxContentLength(1024 * 1024);
+	if (ret != UPNP_E_SUCCESS) {
+		msg << "warning(UpnpSetMaxContentLength): could not raise content-length limit, error code "
+		    << ret << "; keeping libupnp default.";
+		AddDebugLogLineN(logUPnP, msg);
+		msg.str("");
+	}
+
 	ret = UpnpRegisterClient(static_cast<Upnp_FunPtr>(&CUPnPControlPoint::Callback),
 		&m_UPnPClientHandle,
 		&m_UPnPClientHandle);
@@ -1152,7 +1191,8 @@ int CUPnPControlPoint::Callback(Upnp_EventType EventType, void *Event, void * /*
 			// Extract the deviceType
 			std::string devType(IXML::Element::GetChildValueByTag(rootDevice, "deviceType"));
 			// Only add device if it is an InternetGatewayDevice
-			if (stdStringIsEqualCI(devType, UPnP::Device::IGW)) {
+			// (any version — IGD:2 advertises its root as ":2").
+			if (UPnP::TypeMatchesIgnoringVersion(devType, UPnP::Device::IGW)) {
 				// This condition can be used to auto-detect
 				// the UPnP device we are interested in.
 				// Obs.: Don't block the entry here on this
@@ -1226,7 +1266,7 @@ int CUPnPControlPoint::Callback(Upnp_EventType EventType, void *Event, void * /*
 			std::transform(devType.begin(), devType.end(), devType.begin(), tolower);
 		}
 
-		if (stdStringIsEqualCI(devType, UPnP::Device::IGW)) {
+		if (UPnP::TypeMatchesIgnoringVersion(devType, UPnP::Device::IGW)) {
 #if UPNP_VERSION >= 10800
 			const char *deviceID = UpnpDiscovery_get_DeviceID_cstr(dab_event);
 			upnpCP->RemoveRootDevice(deviceID);

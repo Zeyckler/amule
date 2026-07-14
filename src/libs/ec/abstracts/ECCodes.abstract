@@ -151,6 +151,8 @@ EC_OP_FRIEND                        0x57
 
 EC_OP_VERSION_CHECK                 0x58
 
+EC_OP_SHARED_FILE_SEARCH_KAD_NOTES  0x59
+
 [/Section]
 
 [Section Content]
@@ -249,6 +251,7 @@ EC_TAG_PARTFILE                           0x0300
 	EC_TAG_PARTFILE_HASHED_PART_COUNT         0x0320
 	EC_TAG_PARTFILE_A4AFAUTO                  0x0321
 	EC_TAG_PARTFILE_A4AF_SOURCES              0x0322
+	EC_TAG_PARTFILE_KAD_COMMENT_SEARCHING     0x0323
 
 EC_TAG_KNOWNFILE                          0x0400
 	EC_TAG_KNOWNFILE_XFERRED                  0x0401
@@ -272,6 +275,11 @@ EC_TAG_KNOWNFILE                          0x0400
 	EC_TAG_KNOWNFILE_MEDIA_ARTIST             0x0413
 	EC_TAG_KNOWNFILE_MEDIA_ALBUM              0x0414
 	EC_TAG_KNOWNFILE_MEDIA_TITLE              0x0415
+	EC_TAG_KNOWNFILE_PATH                     0x0416
+	EC_TAG_KNOWNFILE_UPLOAD_SPEED             0x0417
+	EC_TAG_KNOWNFILE_UPLOADING_COUNT          0x0418
+	EC_TAG_KNOWNFILE_LAST_UPLOAD              0x0419
+	EC_TAG_KNOWNFILE_SHARED_SINCE             0x041A
 
 EC_TAG_SERVER                             0x0500
 	EC_TAG_SERVER_NAME                        0x0501
@@ -287,6 +295,7 @@ EC_TAG_SERVER                             0x0500
 	EC_TAG_SERVER_VERSION                     0x050B
 	EC_TAG_SERVER_IP                          0x050C
 	EC_TAG_SERVER_PORT                        0x050D
+	EC_TAG_SERVER_COUNTRY                     0x050E
 
 EC_TAG_CLIENT                             0x0600
 	EC_TAG_CLIENT_SOFTWARE                    0x0601
@@ -332,6 +341,9 @@ EC_TAG_CLIENT                             0x0600
 	EC_TAG_CLIENT_OS_INFO                     0x0629
 	EC_TAG_CLIENT_AVAILABLE_PARTS             0x062A
 	EC_TAG_CLIENT_UPLOAD_PART_STATUS          0x062B
+	EC_TAG_CLIENT_IS_FRIEND                   0x062C
+	EC_TAG_CLIENT_SCORE_RATIO                 0x062D
+	EC_TAG_CLIENT_COUNTRY                     0x062E
 
 EC_TAG_SEARCHFILE                         0x0700
 	EC_TAG_SEARCH_TYPE                        0x0701
@@ -378,6 +390,7 @@ EC_TAG_SELECT_PREFS                       0x1000
 		EC_TAG_GENERAL_VERSION_CHECK_LATEST       0x1206
 		EC_TAG_GENERAL_VERSION_CHECK_OUTDATED     0x1207
 		EC_TAG_GENERAL_VERSION_CHECK_TIMESTAMP    0x1208
+		EC_TAG_GENERAL_UPNP_AVAILABLE             0x1209
 
 	EC_TAG_PREFS_CONNECTIONS                  0x1300
 		EC_TAG_CONN_DL_CAP                        0x1301
@@ -394,6 +407,17 @@ EC_TAG_SELECT_PREFS                       0x1000
 		EC_TAG_CONN_RECONNECT                     0x130C
 		EC_TAG_NETWORK_ED2K                       0x130D
 		EC_TAG_NETWORK_KADEMLIA                   0x130E
+		EC_TAG_CONN_BIND_ADDRESS                  0x130F
+		EC_TAG_CONN_BIND_INTERFACE                0x1310
+		EC_TAG_PROXY_ENABLE                       0x1311
+		EC_TAG_PROXY_TYPE                         0x1312
+		EC_TAG_PROXY_HOST                         0x1313
+		EC_TAG_PROXY_PORT                         0x1314
+		EC_TAG_PROXY_AUTH                         0x1315
+		EC_TAG_PROXY_USER                         0x1316
+		EC_TAG_PROXY_PASSWORD                     0x1317
+		EC_TAG_CONN_UPNP_ENABLED                  0x1318
+		EC_TAG_CONN_UPNP_TCP_PORT                 0x1319
 
 	EC_TAG_PREFS_MESSAGEFILTER                0x1400
 		EC_TAG_MSGFILTER_ENABLED                  0x1401
@@ -417,6 +441,8 @@ EC_TAG_SELECT_PREFS                       0x1000
 
 	EC_TAG_PREFS_ONLINESIG                    0x1600
 		EC_TAG_ONLINESIG_ENABLED                  0x1601
+		EC_TAG_ONLINESIG_DIRECTORY                0x1602
+		EC_TAG_ONLINESIG_UPDATE                   0x1603
 
 	EC_TAG_PREFS_SERVERS                      0x1700
 		EC_TAG_SERVERS_REMOVE_DEAD                0x1701
@@ -449,6 +475,9 @@ EC_TAG_SELECT_PREFS                       0x1000
 		EC_TAG_FILES_MIN_FREE_SPACE               0x180E
 		EC_TAG_FILES_CREATE_NORMAL                0x180F
 		EC_TAG_FILES_ENDGAME                      0x1810
+		EC_TAG_FILES_MEDIA_METADATA_ENABLED       0x1811
+		EC_TAG_FILES_MEDIA_FFPROBE_PATH           0x1812
+		EC_TAG_FILES_START_NEXT_ALPHA             0x1813
 
 #	EC_TAG_UNUSED                             0x1900
 #		EC_TAG_UNUSED                             0x1901
@@ -500,6 +529,8 @@ EC_TAG_SELECT_PREFS                       0x1000
 		EC_TAG_SECURITY_OBFUSCATION_SUPPORTED     0x1C09
 		EC_TAG_SECURITY_OBFUSCATION_REQUESTED     0x1C0A
 		EC_TAG_SECURITY_OBFUSCATION_REQUIRED      0x1C0B
+		EC_TAG_IPFILTER_PARANOID                  0x1C0C
+		EC_TAG_IPFILTER_SYSTEM                    0x1C0D
 
 	EC_TAG_PREFS_CORETWEAKS                   0x1D00
 		EC_TAG_CORETW_MAX_CONN_PER_FIVE           0x1D01
@@ -513,6 +544,20 @@ EC_TAG_SELECT_PREFS                       0x1000
 
 	EC_TAG_PREFS_KADEMLIA                     0x1E00
 		EC_TAG_KADEMLIA_UPDATE_URL                0x1E01
+
+	EC_TAG_PREFS_IP2COUNTRY                   0x1F00
+		EC_TAG_IP2COUNTRY_SUPPORTED               0x1F01
+		EC_TAG_IP2COUNTRY_ENABLED                 0x1F02
+		EC_TAG_IP2COUNTRY_SOURCE                  0x1F03
+		EC_TAG_IP2COUNTRY_CUSTOM_URL              0x1F04
+		EC_TAG_IP2COUNTRY_MAXMIND_LICENSE         0x1F05
+		EC_TAG_IP2COUNTRY_AUTO_UPDATE             0x1F06
+		EC_TAG_IP2COUNTRY_LOADED_SOURCE           0x1F07
+		EC_TAG_IP2COUNTRY_DB_PATH                 0x1F08
+		EC_TAG_IP2COUNTRY_DB_LOADED               0x1F09
+		EC_TAG_IP2COUNTRY_DOWNLOADING             0x1F0A
+		EC_TAG_IP2COUNTRY_LAST_RESULT             0x1F0B
+		EC_TAG_IP2COUNTRY_UPDATE_NOW              0x1F0C
 [/Section]
 
 [Section Content]
@@ -568,4 +613,5 @@ EC_PREFS_STATISTICS     0x00000400
 EC_PREFS_SECURITY       0x00000800
 EC_PREFS_CORETWEAKS     0x00001000
 EC_PREFS_KADEMLIA       0x00002000
+EC_PREFS_IP2COUNTRY     0x00004000
 [/Section]

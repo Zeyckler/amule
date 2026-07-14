@@ -199,6 +199,12 @@ public:
 
 	virtual ~CRemoteContainer() {}
 
+	// A reconnect flushed the request FIFO (CRemoteConnect::DiscardRequestQueue):
+	// the status/full reply this container was waiting for is gone, so rewind
+	// the request SM to IDLE. Otherwise DoRequery()/FullReload() see a non-IDLE
+	// state and refuse to re-request, leaving the list frozen after reconnect.
+	virtual void AbortPendingRequest() { m_state = IDLE; }
+
 	typedef typename std::list<T *>::iterator iterator;
 	iterator begin() { return m_items.begin(); }
 	iterator end() { return m_items.end(); }
@@ -526,6 +532,7 @@ public:
 	void Reload(bool sendtoserver = true, bool firstload = false);
 	bool RenameFile(CKnownFile *file, const CPath &newName);
 	void SetFileCommentRating(CKnownFile *file, const wxString &newComment, int8 newRating);
+	void SearchKadNotes(CKnownFile *file);
 	void CopyFileList(std::vector<CKnownFile *> &out_list) const;
 
 	// Remote-side shim for the daemon's cancellable-progress Reload
@@ -553,10 +560,20 @@ class CKnownFilesRem : public CRemoteContainer<CKnownFile, uint32, CEC_SharedFil
 
 	bool m_initialUpdate; // improved handling for first data transfer
 
+	// Set once by the app on a reconnect. A reconnected partial-update
+	// server sends a full snapshot but never re-emits FILE_REMOVED for
+	// files deleted while we were disconnected, so ProcessUpdate() forces
+	// a single prune-by-absence against that snapshot, then clears this.
+	bool m_reconnectReconcile = false;
+
 public:
 	CKnownFilesRem(CRemoteConnect *conn);
 
 	CKnownFile *FindKnownFileByID(uint32 id) { return GetByID(id); }
+
+	// Arm the one-shot reconcile prune for the next full update (reconnect)
+	// and reset every reused file's differential decoders (see the .cpp).
+	void ArmReconnectReconcile();
 
 	uint16 requested;
 	uint32 transferred;
@@ -746,6 +763,26 @@ class CamuleRemoteGuiApp : public wxApp, public CamuleGuiBase, public CamuleAppC
 	// no visible window while TCP SYN silently times out over minutes.
 	wxTimer *connect_timeout_timer;
 
+	// --- Reconnect-after-loss (issue #444) ---
+	// When the EC connection drops after startup (e.g. the machine slept),
+	// amulegui no longer exits: it freezes the UI behind a modal dialog and
+	// retries every 5 s until the connection is restored (then reconciles
+	// all state against the fresh server snapshot in place) or the user
+	// aborts. EC connection params are captured in Startup() so a reconnect
+	// can be attempted without the (destroyed) connection dialog.
+	bool m_reconnecting = false;
+	int m_reconnectAttempt = 0;
+	int m_reconnectCountdown = 0;
+	wxTimer *m_reconnectTimer = nullptr;
+	class CReconnectDialog *m_reconnectDlg = nullptr;
+	wxString m_ecHost;
+	int m_ecPort = 0;
+	wxString m_ecPass;
+	void BeginReconnect();
+	void AttemptReconnect();
+	void ScheduleNextReconnect();
+	void OnReconnectTimer(wxTimerEvent &evt);
+
 	virtual int InitGui(bool geometry_enable, wxString &geometry_string);
 
 	bool OnInit();
@@ -827,6 +864,10 @@ public:
 
 	void AddServerMessageLine(wxString &msg);
 	void AddRemoteLogLine(const wxString &line);
+	// Bracket a stats poll's worth of AddRemoteLogLine() calls so the log
+	// view repaints/scrolls once for the batch, not per line (issue #445).
+	void BeginRemoteLogBatch();
+	void EndRemoteLogBatch();
 
 	void SetOSFiles(wxString) { /* onlinesig is created on remote side */ }
 

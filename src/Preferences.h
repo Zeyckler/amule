@@ -290,7 +290,9 @@ public:
 	static Cfg_Lang_Base *GetCfgLang() { return s_cfgLang; }
 
 	static const wxString &GetAddress() { return s_Addr; }
+	static void SetAddress(const wxString &val) { s_Addr = val; }
 	static const wxString &GetNetworkInterface() { return s_NetworkInterface; }
+	static void SetNetworkInterface(const wxString &val) { s_NetworkInterface = val; }
 	static uint16 GetPort() { return s_port; }
 	static void SetPort(uint16 val);
 	static uint16 GetUDPPort() { return s_udpport; }
@@ -493,6 +495,13 @@ public:
 	static void SetUPnPWebServerEnabled(bool val) { s_UPnPWebServerEnabled = val; }
 	static uint16 GetUPnPTCPPort() { return s_UPnPTCPPort; }
 	static void SetUPnPTCPPort(uint16 val) { s_UPnPTCPPort = val; }
+	// Runtime capability (not persisted): whether the connected daemon is
+	// built with UPnP (ENABLE_UPNP), advertised over EC. amulegui greys the
+	// P2P-UPnP controls when the core can't forward. Set from the EC prefs
+	// apply; false by default so a pre-3.1 daemon (which never sends the tag)
+	// keeps the controls disabled instead of showing a dead toggle.
+	static bool GetUPnPAvailable() { return s_UPnPAvailable; }
+	static void SetUPnPAvailable(bool val) { s_UPnPAvailable = val; }
 	static bool IsManualHighPrio() { return s_bmanualhighprio; }
 	static void SetManualHighPrio(bool val) { s_bmanualhighprio = val; }
 	void LoadCats();
@@ -618,7 +627,9 @@ public:
 	static bool VerticalToolbar() { return s_ToolbarOrientation; }
 
 	static const CPath &GetOSDir() { return s_OSDirectory; }
+	static void SetOSDir(const CPath &val) { s_OSDirectory = val; }
 	static uint16 GetOSUpdate() { return s_OSUpdate; }
+	static void SetOSUpdate(uint16 val) { s_OSUpdate = val; }
 
 	static uint8 GetToolTipDelay() { return s_iToolDelayTime; }
 
@@ -666,6 +677,7 @@ public:
 
 	// Can't have it return a reference, will need a pointer later.
 	static const CProxyData *GetProxyData() { return &s_ProxyData; }
+	static void SetProxyData(const CProxyData &val) { s_ProxyData = val; }
 
 	// Hidden files
 
@@ -815,6 +827,31 @@ public:
 	static void SetGeoIPCustomUrl(const wxString &v) { s_GeoIPCustomUrl = v; }
 	static bool IsGeoIPAutoUpdate() { return s_GeoIPAutoUpdate; }
 	static void SetGeoIPAutoUpdate(bool v) { s_GeoIPAutoUpdate = v; }
+	// Runtime capability (not persisted): does the *core* have GeoIP compiled
+	// in? Always true for monolithic amule; set from EC_TAG_IP2COUNTRY_SUPPORTED
+	// on amulegui so its GeoIP prefs panel can disable itself against a
+	// GeoIP-less daemon (#440 remote config). Defaults true.
+	static bool IsGeoIPSupported() { return s_GeoIPSupported; }
+	static void SetGeoIPSupported(bool v) { s_GeoIPSupported = v; }
+	// Live GeoIP status mirrored from the daemon over EC (#440), for amulegui's
+	// prefs panel. Runtime-only, not persisted. Monolithic amule reads the live
+	// resolver directly and ignores these.
+	static bool IsGeoIPStatusLoaded() { return s_GeoIPStatusLoaded; }
+	static void SetGeoIPStatusLoaded(bool v) { s_GeoIPStatusLoaded = v; }
+	static bool IsGeoIPStatusDownloading() { return s_GeoIPStatusDownloading; }
+	static void SetGeoIPStatusDownloading(bool v) { s_GeoIPStatusDownloading = v; }
+	static const wxString &GetGeoIPStatusLastResult() { return s_GeoIPStatusLastResult; }
+	static void SetGeoIPStatusLastResult(const wxString &v) { s_GeoIPStatusLastResult = v; }
+	static const wxString &GetGeoIPStatusLoadedSource() { return s_GeoIPStatusLoadedSource; }
+	static void SetGeoIPStatusLoadedSource(const wxString &v) { s_GeoIPStatusLoadedSource = v; }
+
+	// Transient "Update now" trigger. amulegui's prefs panel sets this before
+	// its SendToRemote() so the outgoing prefs packet carries an UPDATE_NOW
+	// tag, asking the daemon to refresh its GeoIP DB (the amulegui side has no
+	// local resolver). Runtime-only; cleared after the send. The daemon never
+	// sets it, so its own outbound prefs serialization never emits the tag.
+	static bool IsGeoIPUpdateRequested() { return s_GeoIPUpdateRequested; }
+	static void SetGeoIPUpdateRequested(bool v) { s_GeoIPUpdateRequested = v; }
 
 	// Computes the resolved download URL from the selected source: DB-IP
 	// gets a month substituted into the template; MaxMind has credentials
@@ -894,6 +931,7 @@ protected:
 	static bool s_UPnPECEnabled;
 	static bool s_UPnPWebServerEnabled;
 	static uint16 s_UPnPTCPPort;
+	static bool s_UPnPAvailable;
 
 	////////////// PROXY
 	static CProxyData s_ProxyData;
@@ -1105,6 +1143,13 @@ protected:
 
 	// GeoIP / IP2Country
 	static bool s_GeoIPEnabled;
+	static bool s_GeoIPSupported; // runtime capability, not persisted (defaults true)
+	// Runtime-only live status mirrored from the daemon (not persisted).
+	static bool s_GeoIPStatusLoaded;
+	static bool s_GeoIPStatusDownloading;
+	static wxString s_GeoIPStatusLastResult;
+	static wxString s_GeoIPStatusLoadedSource;
+	static bool s_GeoIPUpdateRequested; // transient "Update now" trigger, not persisted
 	static wxString
 		s_GeoIPSource; // serialised enum: "dbip" / "maxmind" / "custom" — next-download selector
 	static wxString s_GeoIPLoadedSource; // same shape — provenance of the currently-loaded geoip.mmdb

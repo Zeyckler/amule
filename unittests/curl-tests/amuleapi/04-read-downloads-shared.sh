@@ -120,7 +120,7 @@ if [ "$COUNT" -gt 0 ]; then
 		'/downloads[0].name is string'
 	_assert_json_eq '.downloads[0].size | type' number \
 		'/downloads[0].size is numeric'
-	_assert_json_eq '.downloads[0].status | test("^(downloading|paused|completed|hashing|erroneous|completing|allocating|waiting|insufficient_disk|unknown)$")' \
+	_assert_json_eq '.downloads[0].status | test("^(downloading|paused|stopped|completed|hashing|erroneous|completing|allocating|waiting|insufficient_disk|unknown)$")' \
 		true '/downloads[0].status is a known enum value'
 	_assert_json_eq '.downloads[0].priority | test("^(very_low|low|normal|high|release|auto)$")' \
 		true '/downloads[0].priority is a known enum value'
@@ -130,6 +130,8 @@ if [ "$COUNT" -gt 0 ]; then
 		'/downloads[0].sources is object'
 	_assert_json_eq '.downloads[0].sources.total | type' number \
 		'/downloads[0].sources.total is numeric'
+	_assert_json_eq '.downloads[0].kad_search_running | type' boolean \
+		'/downloads[0].kad_search_running is boolean (issue #434)'
 
 	# --- 4. /downloads/{hash} bare-object detail. -----------------
 	HASH=$(printf '%s' "$CURL_BODY" | jq -r '.downloads[0].hash')
@@ -151,6 +153,8 @@ if [ "$COUNT" -gt 0 ]; then
 		'/downloads/{hash} carries aich_hash'
 	_assert_json_eq '.met_file | type' string \
 		'/downloads/{hash} carries met_file'
+	_assert_json_eq '.path | type' string \
+		'/downloads/{hash} carries path (#417)'
 	_assert_json_eq '.queued_count | type' number \
 		'/downloads/{hash} carries queued_count'
 	_assert_json_eq '.comment | type' string \
@@ -167,6 +171,21 @@ if [ "$COUNT" -gt 0 ]; then
 		'/downloads/{hash}/comments carries numeric count'
 	_assert_json_eq '.comments | type' array \
 		'/downloads/{hash}/comments.comments is an array'
+	_assert_json_eq '.kad_search_running | type' boolean \
+		'/downloads/{hash}/comments carries kad_search_running flag'
+
+	# Trigger an on-demand Kad notes lookup (issue #434). Async on the daemon;
+	# 202 Accepted (or 400 amuled_rejected if Kad is not connected in the smoke
+	# environment — accept either as a valid handled response, but not 404/405).
+	_curl -X POST -H "Authorization: Bearer $TOKEN" \
+		"$HOST/api/v0/downloads/$HASH/comments"
+	if [ "$CURL_STATUS" = "202" ] || [ "$CURL_STATUS" = "400" ]; then
+		_pass "POST /downloads/{hash}/comments (Kad search) → $CURL_STATUS (accepted/handled)"
+	else
+		_fail "POST /downloads/{hash}/comments (Kad search)" \
+			"expected 202 or 400, got $CURL_STATUS" \
+			"body head: $(printf '%s' "$CURL_BODY" | head -c 200)"
+	fi
 
 	# Source-reported filenames sub-resource (issue #420).
 	_curl -H "Authorization: Bearer $TOKEN" "$HOST/api/v0/downloads/$HASH/filenames"
@@ -233,6 +252,15 @@ if [ "$SHCOUNT" -gt 0 ]; then
 		'/shared[0].priority is string'
 	_assert_json_eq '.shared[0].priority_auto | type' boolean \
 		'/shared[0].priority_auto is boolean'
+	# Live upload activity (issue #466).
+	_assert_json_eq '.shared[0].upload_speed_bps | type' number \
+		'/shared[0].upload_speed_bps is numeric (#466)'
+	_assert_json_eq '.shared[0].uploading | type' number \
+		'/shared[0].uploading is numeric (#466)'
+	_assert_json_eq '.shared[0].last_upload | type' number \
+		'/shared[0].last_upload is numeric (#466)'
+	_assert_json_eq '.shared[0].shared_since | type' number \
+		'/shared[0].shared_since is numeric (#466)'
 
 	# --- 6b. GET /shared/{hash} detail endpoint (issue #417 Part B). ---
 	SHASH=$(printf '%s' "$CURL_BODY" | jq -r '.shared[0].hash')

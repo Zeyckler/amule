@@ -173,6 +173,12 @@ bool RefresherTick(CamuleapiApp &app, CState &state)
 		std::uint32_t lifecycle_state = 0;
 		{
 			std::unique_ptr<CECPacket> req(new CECPacket(EC_OP_SEARCH_RESULTS, EC_DETAIL_FULL));
+			// Opt into result grouping (issue #431): the empty
+			// EC_TAG_SEARCH_PARENT flag tells the FULL responder to also
+			// emit each same-hash/different-name child so /search/results
+			// can nest them. Other EC clients that don't send it keep the
+			// flat parents-only list.
+			req->AddTag(CECEmptyTag(EC_TAG_SEARCH_PARENT));
 			const CECPacket *resp = app.SendRecvSerialized(req.get());
 			if (!resp)
 				return false;
@@ -203,14 +209,20 @@ bool RefresherTick(CamuleapiApp &app, CState &state)
 	}
 
 	// /preferences + /categories — one EC roundtrip populates both.
-	// Selection bitmask: CATEGORIES (0x01) + GENERAL (0x02) +
-	// CONNECTIONS (0x04). Using the named enums (rather than hex
-	// literals) so a future bit shuffle in ECCodes.h doesn't
-	// silently zero out a section — bit-positional bugs here are
-	// hard to spot in JSON (empty defaults look like "0 KB/s" not
-	// "field not requested").
+	// Selection bitmask requests every category the endpoint exposes
+	// (issue #437 widened this from GENERAL|CONNECTIONS to all EC-
+	// carried groups). Using the named enums (rather than hex literals)
+	// so a future bit shuffle in ECCodes.h doesn't silently zero out a
+	// section — bit-positional bugs here are hard to spot in JSON
+	// (empty defaults look like "0 KB/s" not "field not requested").
+	// STATISTICS is intentionally omitted (its serialize block is empty
+	// — the 0x1B* tags carry live graph data, not stored prefs).
 	{
-		const std::uint32_t selection = EC_PREFS_CATEGORIES | EC_PREFS_GENERAL | EC_PREFS_CONNECTIONS;
+		const std::uint32_t selection =
+			EC_PREFS_CATEGORIES | EC_PREFS_GENERAL | EC_PREFS_CONNECTIONS | EC_PREFS_DIRECTORIES |
+			EC_PREFS_FILES | EC_PREFS_SERVERS | EC_PREFS_SECURITY | EC_PREFS_MESSAGEFILTER |
+			EC_PREFS_REMOTECONTROLS | EC_PREFS_ONLINESIG | EC_PREFS_CORETWEAKS |
+			EC_PREFS_KADEMLIA | EC_PREFS_IP2COUNTRY;
 		std::unique_ptr<CECPacket> req(new CECPacket(EC_OP_GET_PREFERENCES));
 		req->AddTag(CECTag(EC_TAG_SELECT_PREFS, selection));
 		const CECPacket *resp = app.SendRecvSerialized(req.get());

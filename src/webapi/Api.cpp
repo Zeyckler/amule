@@ -738,6 +738,20 @@ CHttpServer::Response CApiDispatcher::DispatchToHandler(const CHttpServer::Reque
 		return HandleClients(req);
 	}
 
+	// /clients/{ecid} — single-peer detail (issue #422). GET/HEAD only;
+	// {ecid} is the EC connection id (unique per live connection).
+	{
+		static const auto client_detail = web_api_path::ParsePattern("/api/v0/clients/{ecid}");
+		const auto path_segs = web_api_path::SplitPath(path);
+		std::map<std::string, std::string> caps;
+		if (web_api_path::Match(client_detail, path_segs, caps)) {
+			if (req.method == "GET" || req.method == "HEAD") {
+				return HandleClientDetail(req, caps["ecid"]);
+			}
+			return ErrorResponse(405, "method_not_allowed", "only GET / HEAD on /clients/{ecid}");
+		}
+	}
+
 	if (path == "/api/v0/shared") {
 		if (req.method == "GET" || req.method == "HEAD") {
 			return HandleSharedList(req);
@@ -987,10 +1001,15 @@ CHttpServer::Response CApiDispatcher::DispatchToHandler(const CHttpServer::Reque
 		const auto path_segs = web_api_path::SplitPath(path);
 		std::map<std::string, std::string> caps;
 		if (web_api_path::Match(dl_comments, path_segs, caps)) {
+			if (req.method == "POST") {
+				// POST triggers an on-demand Kad NOTES lookup; retrieved
+				// community ratings/comments then appear on GET (issue #434).
+				return HandleDownloadCommentsKadSearch(req, caps["hash"]);
+			}
 			if (req.method != "GET" && req.method != "HEAD") {
 				return ErrorResponse(405,
 					"method_not_allowed",
-					"only GET / HEAD on /downloads/{hash}/comments");
+					"only GET / HEAD / POST on /downloads/{hash}/comments");
 			}
 			return HandleDownloadComments(req, caps["hash"]);
 		}
@@ -1721,6 +1740,11 @@ void WriteDownloadObject(
 		WriteProgressParts(w, f);
 	}
 	w.EndObject();
+	// True while an on-demand Kad notes lookup is in flight (issue #434). Kept in
+	// the shared object so list, detail and the SSE download event stay identical;
+	// clients can watch download_updated for the start -> finish transition.
+	w.Key("kad_search_running");
+	w.ValueBool(f.download.kad_comment_searching);
 	if (detail) {
 		// Detail-only fields (GET /downloads/{hash}); omitted from the
 		// list. `part_count` and `remaining_time` are computed here from
@@ -1759,7 +1783,16 @@ void WriteDownloadObject(
 		w.Key("aich_hash");
 		w.ValueString(wxString::FromUTF8(f.aich_hash.c_str()));
 		w.Key("met_file");
-		w.ValueString(wxString::FromUTF8(f.knownfile_filename.c_str()));
+		// The ".part" control-file basename. Empty once the download
+		// completes: the daemon then reuses the _FILENAME tag to carry the
+		// directory path, so only surface it while still a partfile (#417).
+		w.ValueString(f.download.status == "completed"
+				      ? wxString()
+				      : wxString::FromUTF8(f.part_met_basename.c_str()));
+		w.Key("path");
+		// The on-disk directory (Temp while downloading, destination once
+		// completed) — mirrors the `path` field on /shared/{hash} (#417).
+		w.ValueString(wxString::FromUTF8(f.on_disk_dir.c_str()));
 		w.Key("partmet_id");
 		w.ValueInt(static_cast<int64_t>(f.download.partmet_id));
 		w.Key("queued_count");
@@ -1775,9 +1808,11 @@ void WriteDownloadObject(
 	w.EndObject();
 }
 
-void WriteClientObject(CJsonWriter &w, const webapi::ClientSnapshot &c)
+// Base (list-level) client fields. Emits keys into an already-open
+// object (no Begin/End) so both the list writer and the detail writer
+// share one definition of the A-field set.
+void WriteClientBaseFields(CJsonWriter &w, const webapi::ClientSnapshot &c)
 {
-	w.BeginObject();
 	w.Key("client_ecid");
 	w.ValueInt(static_cast<int64_t>(c.ecid));
 	w.Key("client_name");
@@ -1788,6 +1823,9 @@ void WriteClientObject(CJsonWriter &w, const webapi::ClientSnapshot &c)
 	w.ValueString(wxString::FromUTF8(c.ip.c_str()));
 	w.Key("port");
 	w.ValueInt(static_cast<int64_t>(c.port));
+	// ISO 3166-1 alpha-2 (lowercase); "" when GeoIP is off/unresolved (#439).
+	w.Key("country_code");
+	w.ValueString(wxString::FromUTF8(c.country_code.c_str()));
 	w.Key("software");
 	w.ValueString(wxString::FromUTF8(c.software.c_str()));
 	w.Key("software_version");
@@ -1831,6 +1869,58 @@ void WriteClientObject(CJsonWriter &w, const webapi::ClientSnapshot &c)
 	w.ValueString(wxString::FromUTF8(c.obfuscation_status.c_str()));
 	w.Key("friend_slot");
 	w.ValueBool(c.friend_slot);
+}
+
+// List-level client object (GET /clients). Unchanged A-field set.
+void WriteClientObject(CJsonWriter &w, const webapi::ClientSnapshot &c)
+{
+	w.BeginObject();
+	WriteClientBaseFields(w, c);
+	w.EndObject();
+}
+
+// Single-client detail object (GET /clients/{ecid}, issue #422): the
+// full A-field set plus the detail-only B fields. A superset of the
+// list object, so the list schema is unaffected.
+void WriteClientDetailObject(CJsonWriter &w, const webapi::ClientSnapshot &c)
+{
+	w.BeginObject();
+	WriteClientBaseFields(w, c);
+	w.Key("user_id_hybrid");
+	w.ValueUInt(static_cast<uint64_t>(c.user_id_hybrid));
+	w.Key("high_id");
+	w.ValueBool(c.high_id);
+	w.Key("server_ip");
+	w.ValueString(wxString::FromUTF8(c.server_ip.c_str()));
+	w.Key("server_port");
+	w.ValueInt(static_cast<int64_t>(c.server_port));
+	w.Key("server_name");
+	w.ValueString(wxString::FromUTF8(c.server_name.c_str()));
+	w.Key("kad_port");
+	w.ValueInt(static_cast<int64_t>(c.kad_port));
+	w.Key("source_origin");
+	w.ValueString(wxString::FromUTF8(c.source_origin.c_str()));
+	w.Key("upload_file_name");
+	w.ValueString(wxString::FromUTF8(c.upload_file_name.c_str()));
+	w.Key("available_parts");
+	w.ValueInt(static_cast<int64_t>(c.available_parts));
+	w.Key("mod_version");
+	w.ValueString(wxString::FromUTF8(c.mod_version.c_str()));
+	w.Key("view_shared_disabled");
+	w.ValueBool(c.view_shared_disabled);
+	// Friend status + DL/UP modifier (issue #423). is_friend is
+	// friends-list membership, distinct from the friend_slot reserved
+	// upload slot above.
+	w.Key("is_friend");
+	w.ValueBool(c.is_friend);
+	w.Key("dl_up_modifier");
+	w.ValueDouble(c.dl_up_modifier);
+	// Completeness of the linked download for this peer; omitted when
+	// not computable (no linked file / unknown part count).
+	if (c.part_progress_percent >= 0.0) {
+		w.Key("part_progress_percent");
+		w.ValueDouble(c.part_progress_percent);
+	}
 	w.EndObject();
 }
 
@@ -1873,6 +1963,17 @@ void WriteSharedBaseFields(CJsonWriter &w, const webapi::FileSnapshot &f)
 	w.Key("total");
 	w.ValueInt(static_cast<int64_t>(f.shared.accepts_total));
 	w.EndObject();
+	// Live upload activity (issue #466). `upload_speed_bps` + `uploading`
+	// refresh every tick; `last_upload` / `shared_since` are unix seconds,
+	// 0 = unknown (never uploaded / pre-feature known.met entry).
+	w.Key("upload_speed_bps");
+	w.ValueInt(static_cast<int64_t>(f.shared.upload_speed_bps));
+	w.Key("uploading");
+	w.ValueInt(static_cast<int64_t>(f.shared.uploading_count));
+	w.Key("last_upload");
+	w.ValueInt(static_cast<int64_t>(f.shared.last_upload));
+	w.Key("shared_since");
+	w.ValueInt(static_cast<int64_t>(f.shared.shared_since));
 }
 
 void WriteSharedObject(CJsonWriter &w, const webapi::FileSnapshot &f)
@@ -1909,10 +2010,12 @@ void WriteSharedDetailObject(CJsonWriter &w, const webapi::FileSnapshot &f)
 	w.ValueDouble(
 		f.size > 0 ? static_cast<double>(f.shared.xfer_total) / static_cast<double>(f.size) : 0.0);
 	w.Key("path");
-	// A shared partfile has no real directory path (its EC_TAG_KNOWNFILE
-	// _FILENAME is the .part.met basename); the desktop shows "[PartFile]".
-	w.ValueString(f.is_downloading ? wxString::FromAscii("[PartFile]")
-				       : wxString::FromUTF8(f.knownfile_filename.c_str()));
+	// "[PartFile]" only while genuinely an incomplete partfile; once the
+	// download completes (even if still listed under downloads, not yet
+	// cleared) the real destination directory is available (#417).
+	const bool incomplete_partfile = f.is_downloading && f.download.status != "completed";
+	w.ValueString(incomplete_partfile ? wxString::FromAscii("[PartFile]")
+					  : wxString::FromUTF8(f.on_disk_dir.c_str()));
 	w.Key("complete_sources_range");
 	w.BeginObject();
 	w.Key("low");
@@ -2504,6 +2607,10 @@ CHttpServer::Response CApiDispatcher::HandleDownloadComments(
 	w.BeginObject();
 	w.Key("count");
 	w.ValueInt(static_cast<int64_t>(d.download.source_comments.size()));
+	// True while an on-demand Kad notes lookup is in flight (issue #434); poll
+	// this endpoint until it flips back to false to observe retrieved notes.
+	w.Key("kad_search_running");
+	w.ValueBool(d.download.kad_comment_searching);
 	w.Key("comments");
 	w.BeginArray();
 	for (const auto &c : d.download.source_comments) {
@@ -2519,6 +2626,62 @@ CHttpServer::Response CApiDispatcher::HandleDownloadComments(
 		w.EndObject();
 	}
 	w.EndArray();
+	w.EndObject();
+	FinalizeJsonBody(w, r);
+	return r;
+}
+
+// POST /downloads/{hash}/comments — trigger an on-demand Kad NOTES lookup for
+// this download (issue #434). The lookup is asynchronous on amuled (up to ~45s);
+// retrieved community ratings/comments subsequently appear via GET on the same
+// path, alongside per-source comments. Returns 202 Accepted.
+CHttpServer::Response CApiDispatcher::HandleDownloadCommentsKadSearch(
+	const CHttpServer::Request &req, const std::string &key)
+{
+	auto a = AuthenticateRequestRateLimited(
+		req, m_jwt, m_revocations, m_authRateLimiter, kSessionCookieName);
+	if (!a.ok)
+		return a.rejection;
+
+	if (!m_state.HasFirstSnapshot()) {
+		return ErrorResponse(
+			503, "ec_unavailable", "amuleapi has not received its first EC snapshot yet");
+	}
+
+	webapi::FileSnapshot d;
+	std::string needle = key;
+	std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) {
+		return std::tolower(c);
+	});
+	if (!m_state.FindDownload(needle, d)) {
+		return ErrorResponse(404, "not_found", "no download with that hash");
+	}
+
+	CMD4Hash file_hash;
+	if (!HashFromHex(d.hash, file_hash)) {
+		return ErrorResponse(500, "internal_error", "failed to decode file hash");
+	}
+
+	auto ec_req = std::make_unique<CECPacket>(EC_OP_SHARED_FILE_SEARCH_KAD_NOTES);
+	ec_req->AddTag(CECTag(EC_TAG_KNOWNFILE, file_hash));
+	const CECPacket *ec_resp = m_app.SendRecvSerialized(ec_req.get());
+	if (!ec_resp) {
+		return ErrorResponse(503, "ec_unavailable", "EC roundtrip failed for SEARCH_KAD_NOTES");
+	}
+	std::string ec_err;
+	if (IsEcFailedResponse(ec_resp, ec_err)) {
+		delete ec_resp;
+		return ErrorResponse(400, "amuled_rejected", ec_err.c_str());
+	}
+	delete ec_resp;
+
+	CHttpServer::Response r;
+	r.status = 202;
+	r.content_type = "application/json";
+	CJsonWriter w;
+	w.BeginObject();
+	w.Key("status");
+	w.ValueString("kad_search_started");
 	w.EndObject();
 	FinalizeJsonBody(w, r);
 	return r;
@@ -3559,6 +3722,9 @@ void WriteServerObject(CJsonWriter &w, const webapi::ServerSnapshot &s)
 	w.ValueString(wxString::FromUTF8(s.address.c_str()));
 	w.Key("port");
 	w.ValueInt(static_cast<int64_t>(s.port));
+	// ISO 3166-1 alpha-2 (lowercase); "" when GeoIP is off/unresolved (#440).
+	w.Key("country_code");
+	w.ValueString(wxString::FromUTF8(s.country_code.c_str()));
 	w.Key("users");
 	w.ValueInt(static_cast<int64_t>(s.users));
 	w.Key("max_users");
@@ -3670,7 +3836,73 @@ bool FindServerByEcid(const webapi::CState &state, std::uint32_t ecid, webapi::S
 	return false;
 }
 
+// Look up a client in the State cache by ECID (issue #422). Mirrors
+// FindServerByEcid; the handler 404s on false.
+bool FindClientByEcid(const webapi::CState &state, std::uint32_t ecid, webapi::ClientSnapshot &out)
+{
+	const auto all = state.Clients();
+	for (const auto &c : all) {
+		if (c.ecid == ecid) {
+			out = c;
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace
+
+// GET /api/v0/clients/{ecid} (issue #422) — the full detail object for
+// one peer: every list field plus the detail-only B fields. Bare
+// object (no list envelope), mirroring HandleDownloadDetail. 404 when
+// the ecid isn't in the current snapshot.
+CHttpServer::Response CApiDispatcher::HandleClientDetail(
+	const CHttpServer::Request &req, const std::string &ecid_str)
+{
+	auto a = AuthenticateRequestRateLimited(
+		req, m_jwt, m_revocations, m_authRateLimiter, kSessionCookieName);
+	if (!a.ok)
+		return a.rejection;
+
+	std::uint32_t ecid = 0;
+	if (!ParseEcidPath(ecid_str, ecid)) {
+		return ErrorResponse(400, "bad_request", "path `{ecid}` must be a non-negative integer");
+	}
+	if (!m_state.HasFirstSnapshot()) {
+		return ErrorResponse(
+			503, "ec_unavailable", "amuleapi has not received its first EC snapshot yet");
+	}
+	webapi::ClientSnapshot cli;
+	if (!FindClientByEcid(m_state, ecid, cli)) {
+		return ErrorResponse(404, "not_found", "no client with that ECID in the current snapshot");
+	}
+
+	// Completeness of the file we download FROM this peer = parts the
+	// peer has (available_parts) over that file's part count. Only the
+	// download link carries a meaningful denominator; a peer that is
+	// only downloading from us has no percent (available_parts stays).
+	if (cli.has_available_parts && !cli.download_file_hash.empty()) {
+		webapi::FileSnapshot f;
+		if (m_state.FindDownload(cli.download_file_hash, f) && f.size > 0) {
+			const std::uint64_t part_count = (f.size + kPartSize - 1) / kPartSize;
+			if (part_count > 0) {
+				double pct = 100.0 * static_cast<double>(cli.available_parts) /
+					     static_cast<double>(part_count);
+				if (pct > 100.0)
+					pct = 100.0;
+				cli.part_progress_percent = pct;
+			}
+		}
+	}
+
+	CHttpServer::Response r;
+	r.status = 200;
+	r.content_type = "application/json";
+	CJsonWriter w;
+	WriteClientDetailObject(w, cli);
+	FinalizeJsonBody(w, r);
+	return r;
+}
 
 CHttpServer::Response CApiDispatcher::HandleServerAdd(const CHttpServer::Request &req)
 {
@@ -4305,6 +4537,51 @@ void WriteSearchObject(CJsonWriter &w, const webapi::SearchResult &r)
 	w.ValueString(wxString::FromUTF8(r.status.c_str()));
 	w.Key("type");
 	w.ValueString(wxString::FromUTF8(r.type.c_str()));
+	// Media metadata (issue #430) — same shape as the file-detail `media`
+	// object; omitted entirely when the hit carries no media tags.
+	if (r.has_media) {
+		w.Key("media");
+		w.BeginObject();
+		w.Key("length_s");
+		w.ValueInt(static_cast<int64_t>(r.media.length_s));
+		w.Key("bitrate");
+		w.ValueInt(static_cast<int64_t>(r.media.bitrate));
+		w.Key("codec");
+		w.ValueString(wxString::FromUTF8(r.media.codec.c_str()));
+		w.Key("artist");
+		w.ValueString(wxString::FromUTF8(r.media.artist.c_str()));
+		w.Key("album");
+		w.ValueString(wxString::FromUTF8(r.media.album.c_str()));
+		w.Key("title");
+		w.ValueString(wxString::FromUTF8(r.media.title.c_str()));
+		w.EndObject();
+	}
+	// Result grouping (issue #431): the same-hash/same-size hit's
+	// alternative filenames. Always emitted (empty array when the hit was
+	// seen under a single name) so clients can render the expandable tree
+	// without a presence check. Each child shares the parent's `hash`; the
+	// distinct `ecid` selects it for download-under-that-name (see
+	// POST /search/results/{hash}/download).
+	w.Key("children");
+	w.BeginArray();
+	for (const auto &c : r.children) {
+		w.BeginObject();
+		w.Key("ecid");
+		w.ValueInt(static_cast<int64_t>(c.ecid));
+		w.Key("name");
+		w.ValueString(wxString::FromUTF8(c.name.c_str()));
+		w.Key("hash");
+		w.ValueString(wxString::FromUTF8(c.hash.c_str()));
+		w.Key("sources");
+		w.BeginObject();
+		w.Key("total");
+		w.ValueInt(static_cast<int64_t>(c.source_count));
+		w.Key("complete");
+		w.ValueInt(static_cast<int64_t>(c.complete_source_count));
+		w.EndObject();
+		w.EndObject();
+	}
+	w.EndArray();
 	w.EndObject();
 }
 
@@ -4724,23 +5001,17 @@ CHttpServer::Response CApiDispatcher::HandleLogServerinfoReset(const CHttpServer
 	return r;
 }
 
-CHttpServer::Response CApiDispatcher::HandlePreferences(const CHttpServer::Request &req)
+namespace
 {
-	auto a = AuthenticateRequestRateLimited(
-		req, m_jwt, m_revocations, m_authRateLimiter, kSessionCookieName);
-	if (!a.ok)
-		return a.rejection;
-	if (!m_state.HasFirstSnapshot()) {
-		return ErrorResponse(
-			503, "ec_unavailable", "amuleapi has not received its first EC snapshot yet");
-	}
 
-	const webapi::PreferencesSnapshot p = m_state.Preferences();
-	CHttpServer::Response r;
-	r.status = 200;
-	r.content_type = "application/json";
-	CJsonWriter w;
+// Emit the full /preferences JSON object (general + connection + the
+// issue-#437 categories). Shared by the GET handler and the PATCH echo
+// so the response shape is defined exactly once. Passwords are never
+// emitted (write-only).
+void WritePreferencesBody(CJsonWriter &w, const webapi::PreferencesSnapshot &p)
+{
 	w.BeginObject();
+
 	w.Key("general");
 	w.BeginObject();
 	w.Key("nickname");
@@ -4752,6 +5023,7 @@ CHttpServer::Response CApiDispatcher::HandlePreferences(const CHttpServer::Reque
 	w.Key("check_new_version");
 	w.ValueBool(p.check_new_version);
 	w.EndObject();
+
 	w.Key("connection");
 	w.BeginObject();
 	w.Key("max_upload_kbps");
@@ -4782,8 +5054,277 @@ CHttpServer::Response CApiDispatcher::HandlePreferences(const CHttpServer::Reque
 	w.ValueBool(p.network_ed2k);
 	w.Key("network_kad");
 	w.ValueBool(p.network_kad);
+	w.Key("bind_address");
+	w.ValueString(wxString::FromUTF8(p.bind_address.c_str()));
+	w.Key("bind_interface");
+	w.ValueString(wxString::FromUTF8(p.bind_interface.c_str()));
+	// Proxy (proxy_password is write-only: never emitted here).
+	w.Key("proxy_enabled");
+	w.ValueBool(p.proxy_enabled);
+	w.Key("proxy_type");
+	w.ValueInt(static_cast<int64_t>(p.proxy_type));
+	w.Key("proxy_host");
+	w.ValueString(wxString::FromUTF8(p.proxy_host.c_str()));
+	w.Key("proxy_port");
+	w.ValueInt(static_cast<int64_t>(p.proxy_port));
+	w.Key("proxy_auth");
+	w.ValueBool(p.proxy_auth);
+	w.Key("proxy_user");
+	w.ValueString(wxString::FromUTF8(p.proxy_user.c_str()));
+	// P2P-router UPnP. upnp_available is read-only (daemon capability).
+	w.Key("upnp_available");
+	w.ValueBool(p.upnp_available);
+	w.Key("upnp_enabled");
+	w.ValueBool(p.upnp_enabled);
+	w.Key("upnp_tcp_port");
+	w.ValueInt(static_cast<int64_t>(p.upnp_tcp_port));
 	w.EndObject();
+
+	w.Key("directories");
+	w.BeginObject();
+	w.Key("incoming");
+	w.ValueString(wxString::FromUTF8(p.directories.incoming.c_str()));
+	w.Key("temp");
+	w.ValueString(wxString::FromUTF8(p.directories.temp.c_str()));
+	w.Key("shared");
+	w.BeginArray();
+	for (const std::string &dir : p.directories.shared) {
+		w.ValueString(wxString::FromUTF8(dir.c_str()));
+	}
+	w.EndArray();
+	w.Key("share_hidden");
+	w.ValueBool(p.directories.share_hidden);
+	w.Key("auto_rescan");
+	w.ValueBool(p.directories.auto_rescan);
+	w.Key("follow_symlinks");
+	w.ValueBool(p.directories.follow_symlinks);
+	w.Key("exclude_patterns");
+	w.ValueString(wxString::FromUTF8(p.directories.exclude_patterns.c_str()));
+	w.Key("exclude_regex");
+	w.ValueBool(p.directories.exclude_regex);
 	w.EndObject();
+
+	w.Key("files");
+	w.BeginObject();
+	w.Key("ich_enabled");
+	w.ValueBool(p.files.ich_enabled);
+	w.Key("aich_trust");
+	w.ValueBool(p.files.aich_trust);
+	w.Key("new_paused");
+	w.ValueBool(p.files.new_paused);
+	w.Key("new_auto_dl_prio");
+	w.ValueBool(p.files.new_auto_dl_prio);
+	w.Key("new_auto_ul_prio");
+	w.ValueBool(p.files.new_auto_ul_prio);
+	w.Key("preview_prio");
+	w.ValueBool(p.files.preview_prio);
+	w.Key("start_next_paused");
+	w.ValueBool(p.files.start_next_paused);
+	w.Key("resume_same_cat");
+	w.ValueBool(p.files.resume_same_cat);
+	w.Key("save_sources");
+	w.ValueBool(p.files.save_sources);
+	w.Key("extract_metadata");
+	w.ValueBool(p.files.extract_metadata);
+	w.Key("alloc_full_size");
+	w.ValueBool(p.files.alloc_full_size);
+	w.Key("check_free_space");
+	w.ValueBool(p.files.check_free_space);
+	w.Key("min_free_space_mb");
+	w.ValueInt(static_cast<int64_t>(p.files.min_free_space_mb));
+	w.Key("create_normal");
+	w.ValueBool(p.files.create_normal);
+	w.Key("start_next_alphabetical");
+	w.ValueBool(p.files.start_next_alphabetical);
+	w.Key("media_metadata_enabled");
+	w.ValueBool(p.files.media_metadata_enabled);
+	w.Key("ffprobe_path");
+	w.ValueString(wxString::FromUTF8(p.files.ffprobe_path.c_str()));
+	w.EndObject();
+
+	w.Key("servers");
+	w.BeginObject();
+	w.Key("remove_dead");
+	w.ValueBool(p.servers.remove_dead);
+	w.Key("dead_server_retries");
+	w.ValueInt(static_cast<int64_t>(p.servers.dead_server_retries));
+	w.Key("auto_update");
+	w.ValueBool(p.servers.auto_update);
+	w.Key("add_from_server");
+	w.ValueBool(p.servers.add_from_server);
+	w.Key("add_from_client");
+	w.ValueBool(p.servers.add_from_client);
+	w.Key("use_score_system");
+	w.ValueBool(p.servers.use_score_system);
+	w.Key("smart_id_check");
+	w.ValueBool(p.servers.smart_id_check);
+	w.Key("safe_server_connect");
+	w.ValueBool(p.servers.safe_server_connect);
+	w.Key("autoconn_static_only");
+	w.ValueBool(p.servers.autoconn_static_only);
+	w.Key("manual_high_prio");
+	w.ValueBool(p.servers.manual_high_prio);
+	w.Key("update_url");
+	w.ValueString(wxString::FromUTF8(p.servers.update_url.c_str()));
+	w.EndObject();
+
+	w.Key("security");
+	w.BeginObject();
+	w.Key("can_see_shares");
+	w.ValueBool(p.security.can_see_shares);
+	w.Key("ipfilter_clients");
+	w.ValueBool(p.security.ipfilter_clients);
+	w.Key("ipfilter_servers");
+	w.ValueBool(p.security.ipfilter_servers);
+	w.Key("ipfilter_auto_update");
+	w.ValueBool(p.security.ipfilter_auto_update);
+	w.Key("ipfilter_update_url");
+	w.ValueString(wxString::FromUTF8(p.security.ipfilter_update_url.c_str()));
+	w.Key("ipfilter_level");
+	w.ValueInt(static_cast<int64_t>(p.security.ipfilter_level));
+	w.Key("ipfilter_filter_lan");
+	w.ValueBool(p.security.ipfilter_filter_lan);
+	w.Key("use_secident");
+	w.ValueBool(p.security.use_secident);
+	w.Key("obfuscation_supported");
+	w.ValueBool(p.security.obfuscation_supported);
+	w.Key("obfuscation_requested");
+	w.ValueBool(p.security.obfuscation_requested);
+	w.Key("obfuscation_required");
+	w.ValueBool(p.security.obfuscation_required);
+	w.Key("paranoid_filtering");
+	w.ValueBool(p.security.paranoid_filtering);
+	w.Key("use_system_ipfilter");
+	w.ValueBool(p.security.use_system_ipfilter);
+	w.EndObject();
+
+	w.Key("message_filter");
+	w.BeginObject();
+	w.Key("enabled");
+	w.ValueBool(p.message_filter.enabled);
+	w.Key("all");
+	w.ValueBool(p.message_filter.all);
+	w.Key("friends");
+	w.ValueBool(p.message_filter.friends);
+	w.Key("secure");
+	w.ValueBool(p.message_filter.secure);
+	w.Key("by_keyword");
+	w.ValueBool(p.message_filter.by_keyword);
+	w.Key("keywords");
+	w.ValueString(wxString::FromUTF8(p.message_filter.keywords.c_str()));
+	w.EndObject();
+
+	w.Key("remote_controls");
+	w.BeginObject();
+	w.Key("webserver_enabled");
+	w.ValueBool(p.remote_controls.webserver_enabled);
+	w.Key("webserver_port");
+	w.ValueInt(static_cast<int64_t>(p.remote_controls.webserver_port));
+	w.Key("webserver_use_gzip");
+	w.ValueBool(p.remote_controls.webserver_use_gzip);
+	w.Key("webserver_refresh");
+	w.ValueInt(static_cast<int64_t>(p.remote_controls.webserver_refresh));
+	w.Key("webserver_template");
+	w.ValueString(wxString::FromUTF8(p.remote_controls.webserver_template.c_str()));
+	w.Key("webserver_guest_enabled");
+	w.ValueBool(p.remote_controls.webserver_guest_enabled);
+	w.Key("amuleapi_enabled");
+	w.ValueBool(p.remote_controls.amuleapi_enabled);
+	w.Key("amuleapi_port");
+	w.ValueInt(static_cast<int64_t>(p.remote_controls.amuleapi_port));
+	w.Key("amuleapi_bind");
+	w.ValueString(wxString::FromUTF8(p.remote_controls.amuleapi_bind.c_str()));
+	w.EndObject();
+
+	w.Key("online_signature");
+	w.BeginObject();
+	w.Key("enabled");
+	w.ValueBool(p.online_signature.enabled);
+	w.Key("directory");
+	w.ValueString(wxString::FromUTF8(p.online_signature.directory.c_str()));
+	w.Key("update_frequency");
+	w.ValueInt(static_cast<int64_t>(p.online_signature.update_frequency));
+	w.EndObject();
+
+	w.Key("core_tweaks");
+	w.BeginObject();
+	w.Key("max_conn_per_five");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.max_conn_per_five));
+	w.Key("verbose");
+	w.ValueBool(p.core_tweaks.verbose);
+	w.Key("filebuffer");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.filebuffer));
+	w.Key("ul_queue");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.ul_queue));
+	w.Key("srv_keepalive_timeout");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.srv_keepalive_timeout));
+	w.Key("kad_max_searches");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.kad_max_searches));
+	w.Key("kad_reask_ms");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.kad_reask_ms));
+	w.Key("source_reask_ms");
+	w.ValueInt(static_cast<int64_t>(p.core_tweaks.source_reask_ms));
+	w.EndObject();
+
+	w.Key("kademlia");
+	w.BeginObject();
+	w.Key("update_url");
+	w.ValueString(wxString::FromUTF8(p.kademlia.update_url.c_str()));
+	w.EndObject();
+
+	// [IP2Country] (#440). `supported` is a capability flag — false when
+	// the daemon is built without GeoIP (the category is then absent and
+	// every field keeps its default). `maxmind_license` round-trips plainly
+	// (a config string, not a masked password). The loaded_source / db_* /
+	// downloading / last_result group is read-only daemon status.
+	w.Key("ip2country");
+	w.BeginObject();
+	w.Key("supported");
+	w.ValueBool(p.ip2country.supported);
+	w.Key("enabled");
+	w.ValueBool(p.ip2country.enabled);
+	w.Key("source");
+	w.ValueString(wxString::FromUTF8(p.ip2country.source.c_str()));
+	w.Key("custom_url");
+	w.ValueString(wxString::FromUTF8(p.ip2country.custom_url.c_str()));
+	w.Key("maxmind_license");
+	w.ValueString(wxString::FromUTF8(p.ip2country.maxmind_license.c_str()));
+	w.Key("auto_update");
+	w.ValueBool(p.ip2country.auto_update);
+	w.Key("loaded_source");
+	w.ValueString(wxString::FromUTF8(p.ip2country.loaded_source.c_str()));
+	w.Key("db_path");
+	w.ValueString(wxString::FromUTF8(p.ip2country.db_path.c_str()));
+	w.Key("db_loaded");
+	w.ValueBool(p.ip2country.db_loaded);
+	w.Key("downloading");
+	w.ValueBool(p.ip2country.downloading);
+	w.Key("last_result");
+	w.ValueString(wxString::FromUTF8(p.ip2country.last_result.c_str()));
+	w.EndObject();
+
+	w.EndObject();
+}
+
+} // namespace
+
+CHttpServer::Response CApiDispatcher::HandlePreferences(const CHttpServer::Request &req)
+{
+	auto a = AuthenticateRequestRateLimited(
+		req, m_jwt, m_revocations, m_authRateLimiter, kSessionCookieName);
+	if (!a.ok)
+		return a.rejection;
+	if (!m_state.HasFirstSnapshot()) {
+		return ErrorResponse(
+			503, "ec_unavailable", "amuleapi has not received its first EC snapshot yet");
+	}
+
+	const webapi::PreferencesSnapshot p = m_state.Preferences();
+	CHttpServer::Response r;
+	r.status = 200;
+	r.content_type = "application/json";
+	CJsonWriter w;
+	WritePreferencesBody(w, p);
 	FinalizeJsonBody(w, r);
 	return r;
 }
@@ -4806,6 +5347,152 @@ struct PrefsParseError
 // boolean tags (CEC_Prefs_Packet::Apply checks
 // `use_tag = (GetDetailLevel() == EC_DETAIL_FULL)` before calling
 // ApplyBoolean). FULL is also what amulegui sends.
+
+// --- Generic optional-field extractors for the #437 categories -------
+//
+// Each pulls one optional key from a sub-object into the EC group tag,
+// validating its JSON type. Returns false and sets `err` on a type/
+// range error; returns true (and leaves `group` untouched) when the
+// key is simply absent. `any` is set true when a field is written.
+// Booleans always pack as a value tag (uint8 0/1): CEC_Prefs_Packet::
+// Apply reads `GetInt()!=0` under EC_DETAIL_FULL, so an empty presence
+// tag would be read as false.
+bool PrefTakeUint(const picojson::object &o,
+	CECTag &group,
+	const char *key,
+	ec_tagname_t name,
+	std::uint32_t max,
+	bool &any,
+	std::string &err)
+{
+	const auto it = o.find(key);
+	if (it == o.end())
+		return true;
+	if (!it->second.is<double>()) {
+		err = std::string(key) + " must be a non-negative integer";
+		return false;
+	}
+	const double v = it->second.get<double>();
+	if (v < 0 || v > static_cast<double>(max)) {
+		err = std::string(key) + " out of range";
+		return false;
+	}
+	group.AddTag(CECTag(name, static_cast<std::uint32_t>(v)));
+	any = true;
+	return true;
+}
+
+bool PrefTakeBool(const picojson::object &o,
+	CECTag &group,
+	const char *key,
+	ec_tagname_t name,
+	bool &any,
+	std::string &err)
+{
+	const auto it = o.find(key);
+	if (it == o.end())
+		return true;
+	if (!it->second.is<bool>()) {
+		err = std::string(key) + " must be a bool";
+		return false;
+	}
+	group.AddTag(CECTag(name, static_cast<std::uint8_t>(it->second.get<bool>() ? 1 : 0)));
+	any = true;
+	return true;
+}
+
+bool PrefTakeString(const picojson::object &o,
+	CECTag &group,
+	const char *key,
+	ec_tagname_t name,
+	bool &any,
+	std::string &err)
+{
+	const auto it = o.find(key);
+	if (it == o.end())
+		return true;
+	if (!it->second.is<std::string>()) {
+		err = std::string(key) + " must be a string";
+		return false;
+	}
+	group.AddTag(CECTag(name, wxString::FromUTF8(it->second.get<std::string>().c_str())));
+	any = true;
+	return true;
+}
+
+// String-array field (directories.shared): a JSON array of strings
+// packed as EC_TAG_STRING children, mirroring the core serializer.
+bool PrefTakeStringArray(const picojson::object &o,
+	CECTag &group,
+	const char *key,
+	ec_tagname_t name,
+	bool &any,
+	std::string &err)
+{
+	const auto it = o.find(key);
+	if (it == o.end())
+		return true;
+	if (!it->second.is<picojson::array>()) {
+		err = std::string(key) + " must be an array of strings";
+		return false;
+	}
+	const auto &arr = it->second.get<picojson::array>();
+	CECTag list(name, static_cast<std::uint32_t>(arr.size()));
+	for (const auto &el : arr) {
+		if (!el.is<std::string>()) {
+			err = std::string(key) + " must be an array of strings";
+			return false;
+		}
+		list.AddTag(CECTag(EC_TAG_STRING, wxString::FromUTF8(el.get<std::string>().c_str())));
+	}
+	group.AddTag(list);
+	any = true;
+	return true;
+}
+
+// Write-only password: hash the plaintext with MD5 (matching how the
+// daemon stores WS/amuleapi passwords) and pack the 16-byte digest as
+// the given hash tag. Never round-trips on GET.
+bool PrefTakePassword(const picojson::object &o,
+	CECTag &group,
+	const char *key,
+	ec_tagname_t name,
+	bool &any,
+	std::string &err)
+{
+	const auto it = o.find(key);
+	if (it == o.end())
+		return true;
+	if (!it->second.is<std::string>()) {
+		err = std::string(key) + " must be a string";
+		return false;
+	}
+	const wxString md5hex = MD5Sum(wxString::FromUTF8(it->second.get<std::string>().c_str())).GetHash();
+	CMD4Hash hash;
+	if (!HashFromHex(std::string(md5hex.utf8_str()), hash)) {
+		err = std::string(key) + " could not be hashed";
+		return false;
+	}
+	group.AddTag(CECTag(name, hash));
+	any = true;
+	return true;
+}
+
+// Resolve an optional sub-object by key. Returns false + err when the
+// key is present but not an object; leaves `out` null when absent.
+bool PrefFindSubObject(
+	const picojson::object &obj, const char *key, const picojson::object *&out, std::string &err)
+{
+	const auto it = obj.find(key);
+	if (it == obj.end())
+		return true;
+	if (!it->second.is<picojson::object>()) {
+		err = std::string("`") + key + "` must be an object";
+		return false;
+	}
+	out = &it->second.get<picojson::object>();
+	return true;
+}
 } // namespace
 
 CHttpServer::Response CApiDispatcher::HandlePreferencesPatch(const CHttpServer::Request &req)
@@ -4849,12 +5536,9 @@ CHttpServer::Response CApiDispatcher::HandlePreferencesPatch(const CHttpServer::
 		}
 	}
 
-	if (general_obj == nullptr && connection_obj == nullptr) {
-		return ErrorResponse(400,
-			"bad_request",
-			"request body must include at least one of `general` or "
-			"`connection` sub-objects");
-	}
+	// The set of recognized sub-objects widened well past general/
+	// connection (issue #437); a body with none of them is caught by
+	// the `any_change` guard after parsing, which returns the same 400.
 
 	// Build the SET_PREFERENCES packet at EC_DETAIL_FULL (required for
 	// boolean fields — Apply() gates ApplyBoolean on detail==FULL).
@@ -4948,6 +5632,23 @@ CHttpServer::Response CApiDispatcher::HandlePreferencesPatch(const CHttpServer::
 			ok.status = 200;
 			return ok;
 		};
+		auto take_string = [&](const char *key, ec_tagname_t name) -> CHttpServer::Response {
+			const auto it = connection_obj->find(key);
+			if (it == connection_obj->end()) {
+				CHttpServer::Response ok;
+				ok.status = 0;
+				return ok;
+			}
+			if (!it->second.is<std::string>()) {
+				return ErrorResponse(400, "bad_request", "connection field must be a string");
+			}
+			connection.AddTag(
+				CECTag(name, wxString::FromUTF8(it->second.get<std::string>().c_str())));
+			any_conn = true;
+			CHttpServer::Response ok;
+			ok.status = 200;
+			return ok;
+		};
 
 		// Uints — kbps caps in [0, 1_000_000_000], ports in [0, 65535].
 		const std::uint32_t kbps_max = 1000000000u;
@@ -4996,8 +5697,617 @@ CHttpServer::Response CApiDispatcher::HandlePreferencesPatch(const CHttpServer::
 		if (rb5.status >= 400)
 			return rb5;
 
+		// Bind-to-IP address (empty string = bind to any).
+		auto rs1 = take_string("bind_address", EC_TAG_CONN_BIND_ADDRESS);
+		if (rs1.status >= 400)
+			return rs1;
+		// Bind-to-interface (daemon-side interface name; empty = any).
+		auto rs2 = take_string("bind_interface", EC_TAG_CONN_BIND_INTERFACE);
+		if (rs2.status >= 400)
+			return rs2;
+
+		// Proxy. proxy_type: 0 SOCKS5 / 1 SOCKS4 / 2 HTTP / 3 SOCKS4a.
+		// proxy_password is write-only (accepted here, never echoed on GET).
+		auto rp1 = take_bool("proxy_enabled", EC_TAG_PROXY_ENABLE);
+		if (rp1.status >= 400)
+			return rp1;
+		auto rp2 = take_uint("proxy_type", EC_TAG_PROXY_TYPE, 3);
+		if (rp2.status >= 400)
+			return rp2;
+		auto rp3 = take_string("proxy_host", EC_TAG_PROXY_HOST);
+		if (rp3.status >= 400)
+			return rp3;
+		auto rp4 = take_uint("proxy_port", EC_TAG_PROXY_PORT, 65535);
+		if (rp4.status >= 400)
+			return rp4;
+		auto rp5 = take_bool("proxy_auth", EC_TAG_PROXY_AUTH);
+		if (rp5.status >= 400)
+			return rp5;
+		auto rp6 = take_string("proxy_user", EC_TAG_PROXY_USER);
+		if (rp6.status >= 400)
+			return rp6;
+		auto rp7 = take_string("proxy_password", EC_TAG_PROXY_PASSWORD);
+		if (rp7.status >= 400)
+			return rp7;
+
+		// P2P-router UPnP (upnp_available is read-only, not accepted here).
+		auto ru1 = take_bool("upnp_enabled", EC_TAG_CONN_UPNP_ENABLED);
+		if (ru1.status >= 400)
+			return ru1;
+		auto ru2 = take_uint("upnp_tcp_port", EC_TAG_CONN_UPNP_TCP_PORT, 65535);
+		if (ru2.status >= 400)
+			return ru2;
+
 		if (any_conn) {
 			ec_req->AddTag(connection);
+			any_change = true;
+		}
+	}
+
+	// --- Extended EC-carried categories (issue #437). ----------------
+	// Each optional sub-object is validated and packed into its EC group
+	// tag via the generic PrefTake* helpers; a chained `|| !...` stops at
+	// the first bad field and returns its 400. Port caps use 65535;
+	// counters/durations use a generous uint32 ceiling.
+	const std::uint32_t kU32Max = 0xFFFFFFFFu;
+	std::string perr;
+
+	const picojson::object *directories_obj = nullptr;
+	const picojson::object *files_obj = nullptr;
+	const picojson::object *servers_obj = nullptr;
+	const picojson::object *security_obj = nullptr;
+	const picojson::object *message_filter_obj = nullptr;
+	const picojson::object *remote_controls_obj = nullptr;
+	const picojson::object *online_signature_obj = nullptr;
+	const picojson::object *core_tweaks_obj = nullptr;
+	const picojson::object *kademlia_obj = nullptr;
+	const picojson::object *ip2country_obj = nullptr;
+	if (!PrefFindSubObject(obj, "directories", directories_obj, perr) ||
+		!PrefFindSubObject(obj, "files", files_obj, perr) ||
+		!PrefFindSubObject(obj, "servers", servers_obj, perr) ||
+		!PrefFindSubObject(obj, "security", security_obj, perr) ||
+		!PrefFindSubObject(obj, "message_filter", message_filter_obj, perr) ||
+		!PrefFindSubObject(obj, "remote_controls", remote_controls_obj, perr) ||
+		!PrefFindSubObject(obj, "online_signature", online_signature_obj, perr) ||
+		!PrefFindSubObject(obj, "core_tweaks", core_tweaks_obj, perr) ||
+		!PrefFindSubObject(obj, "kademlia", kademlia_obj, perr) ||
+		!PrefFindSubObject(obj, "ip2country", ip2country_obj, perr)) {
+		return ErrorResponse(400, "bad_request", perr.c_str());
+	}
+
+	if (directories_obj) {
+		CECTag g(EC_TAG_PREFS_DIRECTORIES, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeString(
+			    *directories_obj, g, "incoming", EC_TAG_DIRECTORIES_INCOMING, any, perr) ||
+			!PrefTakeString(*directories_obj, g, "temp", EC_TAG_DIRECTORIES_TEMP, any, perr) ||
+			!PrefTakeStringArray(
+				*directories_obj, g, "shared", EC_TAG_DIRECTORIES_SHARED, any, perr) ||
+			!PrefTakeBool(*directories_obj,
+				g,
+				"share_hidden",
+				EC_TAG_DIRECTORIES_SHARE_HIDDEN,
+				any,
+				perr) ||
+			!PrefTakeBool(*directories_obj,
+				g,
+				"auto_rescan",
+				EC_TAG_DIRECTORIES_AUTO_RESCAN,
+				any,
+				perr) ||
+			!PrefTakeBool(*directories_obj,
+				g,
+				"follow_symlinks",
+				EC_TAG_DIRECTORIES_FOLLOW_SYMLINKS,
+				any,
+				perr) ||
+			!PrefTakeString(*directories_obj,
+				g,
+				"exclude_patterns",
+				EC_TAG_DIRECTORIES_EXCLUDE_PATTERNS,
+				any,
+				perr) ||
+			!PrefTakeBool(*directories_obj,
+				g,
+				"exclude_regex",
+				EC_TAG_DIRECTORIES_EXCLUDE_REGEX,
+				any,
+				perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (files_obj) {
+		CECTag g(EC_TAG_PREFS_FILES, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(*files_obj, g, "ich_enabled", EC_TAG_FILES_ICH_ENABLED, any, perr) ||
+			!PrefTakeBool(*files_obj, g, "aich_trust", EC_TAG_FILES_AICH_TRUST, any, perr) ||
+			!PrefTakeBool(*files_obj, g, "new_paused", EC_TAG_FILES_NEW_PAUSED, any, perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"new_auto_dl_prio",
+				EC_TAG_FILES_NEW_AUTO_DL_PRIO,
+				any,
+				perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"new_auto_ul_prio",
+				EC_TAG_FILES_NEW_AUTO_UL_PRIO,
+				any,
+				perr) ||
+			!PrefTakeBool(*files_obj, g, "preview_prio", EC_TAG_FILES_PREVIEW_PRIO, any, perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"start_next_paused",
+				EC_TAG_FILES_START_NEXT_PAUSED,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*files_obj, g, "resume_same_cat", EC_TAG_FILES_RESUME_SAME_CAT, any, perr) ||
+			!PrefTakeBool(*files_obj, g, "save_sources", EC_TAG_FILES_SAVE_SOURCES, any, perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"extract_metadata",
+				EC_TAG_FILES_EXTRACT_METADATA,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*files_obj, g, "alloc_full_size", EC_TAG_FILES_ALLOC_FULL_SIZE, any, perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"check_free_space",
+				EC_TAG_FILES_CHECK_FREE_SPACE,
+				any,
+				perr) ||
+			!PrefTakeUint(*files_obj,
+				g,
+				"min_free_space_mb",
+				EC_TAG_FILES_MIN_FREE_SPACE,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*files_obj, g, "create_normal", EC_TAG_FILES_CREATE_NORMAL, any, perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"start_next_alphabetical",
+				EC_TAG_FILES_START_NEXT_ALPHA,
+				any,
+				perr) ||
+			!PrefTakeBool(*files_obj,
+				g,
+				"media_metadata_enabled",
+				EC_TAG_FILES_MEDIA_METADATA_ENABLED,
+				any,
+				perr) ||
+			!PrefTakeString(
+				*files_obj, g, "ffprobe_path", EC_TAG_FILES_MEDIA_FFPROBE_PATH, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (servers_obj) {
+		CECTag g(EC_TAG_PREFS_SERVERS, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(*servers_obj, g, "remove_dead", EC_TAG_SERVERS_REMOVE_DEAD, any, perr) ||
+			!PrefTakeUint(*servers_obj,
+				g,
+				"dead_server_retries",
+				EC_TAG_SERVERS_DEAD_SERVER_RETRIES,
+				65535,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*servers_obj, g, "auto_update", EC_TAG_SERVERS_AUTO_UPDATE, any, perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"add_from_server",
+				EC_TAG_SERVERS_ADD_FROM_SERVER,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"add_from_client",
+				EC_TAG_SERVERS_ADD_FROM_CLIENT,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"use_score_system",
+				EC_TAG_SERVERS_USE_SCORE_SYSTEM,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"smart_id_check",
+				EC_TAG_SERVERS_SMART_ID_CHECK,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"safe_server_connect",
+				EC_TAG_SERVERS_SAFE_SERVER_CONNECT,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"autoconn_static_only",
+				EC_TAG_SERVERS_AUTOCONN_STATIC_ONLY,
+				any,
+				perr) ||
+			!PrefTakeBool(*servers_obj,
+				g,
+				"manual_high_prio",
+				EC_TAG_SERVERS_MANUAL_HIGH_PRIO,
+				any,
+				perr) ||
+			!PrefTakeString(
+				*servers_obj, g, "update_url", EC_TAG_SERVERS_UPDATE_URL, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (security_obj) {
+		CECTag g(EC_TAG_PREFS_SECURITY, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(
+			    *security_obj, g, "can_see_shares", EC_TAG_SECURITY_CAN_SEE_SHARES, any, perr) ||
+			!PrefTakeBool(
+				*security_obj, g, "ipfilter_clients", EC_TAG_IPFILTER_CLIENTS, any, perr) ||
+			!PrefTakeBool(
+				*security_obj, g, "ipfilter_servers", EC_TAG_IPFILTER_SERVERS, any, perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"ipfilter_auto_update",
+				EC_TAG_IPFILTER_AUTO_UPDATE,
+				any,
+				perr) ||
+			!PrefTakeString(*security_obj,
+				g,
+				"ipfilter_update_url",
+				EC_TAG_IPFILTER_UPDATE_URL,
+				any,
+				perr) ||
+			!PrefTakeUint(
+				*security_obj, g, "ipfilter_level", EC_TAG_IPFILTER_LEVEL, 255, any, perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"ipfilter_filter_lan",
+				EC_TAG_IPFILTER_FILTER_LAN,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*security_obj, g, "use_secident", EC_TAG_SECURITY_USE_SECIDENT, any, perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"obfuscation_supported",
+				EC_TAG_SECURITY_OBFUSCATION_SUPPORTED,
+				any,
+				perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"obfuscation_requested",
+				EC_TAG_SECURITY_OBFUSCATION_REQUESTED,
+				any,
+				perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"obfuscation_required",
+				EC_TAG_SECURITY_OBFUSCATION_REQUIRED,
+				any,
+				perr) ||
+			!PrefTakeBool(*security_obj,
+				g,
+				"paranoid_filtering",
+				EC_TAG_IPFILTER_PARANOID,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*security_obj, g, "use_system_ipfilter", EC_TAG_IPFILTER_SYSTEM, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (message_filter_obj) {
+		CECTag g(EC_TAG_PREFS_MESSAGEFILTER, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(*message_filter_obj, g, "enabled", EC_TAG_MSGFILTER_ENABLED, any, perr) ||
+			!PrefTakeBool(*message_filter_obj, g, "all", EC_TAG_MSGFILTER_ALL, any, perr) ||
+			!PrefTakeBool(
+				*message_filter_obj, g, "friends", EC_TAG_MSGFILTER_FRIENDS, any, perr) ||
+			!PrefTakeBool(*message_filter_obj, g, "secure", EC_TAG_MSGFILTER_SECURE, any, perr) ||
+			!PrefTakeBool(*message_filter_obj,
+				g,
+				"by_keyword",
+				EC_TAG_MSGFILTER_BY_KEYWORD,
+				any,
+				perr) ||
+			!PrefTakeString(
+				*message_filter_obj, g, "keywords", EC_TAG_MSGFILTER_KEYWORDS, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (remote_controls_obj) {
+		CECTag g(EC_TAG_PREFS_REMOTECTRL, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(*remote_controls_obj,
+			    g,
+			    "webserver_enabled",
+			    EC_TAG_WEBSERVER_AUTORUN,
+			    any,
+			    perr) ||
+			!PrefTakeUint(*remote_controls_obj,
+				g,
+				"webserver_port",
+				EC_TAG_WEBSERVER_PORT,
+				65535,
+				any,
+				perr) ||
+			!PrefTakeBool(*remote_controls_obj,
+				g,
+				"webserver_use_gzip",
+				EC_TAG_WEBSERVER_USEGZIP,
+				any,
+				perr) ||
+			!PrefTakeUint(*remote_controls_obj,
+				g,
+				"webserver_refresh",
+				EC_TAG_WEBSERVER_REFRESH,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeString(*remote_controls_obj,
+				g,
+				"webserver_template",
+				EC_TAG_WEBSERVER_TEMPLATE,
+				any,
+				perr) ||
+			!PrefTakeBool(*remote_controls_obj,
+				g,
+				"amuleapi_enabled",
+				EC_TAG_AMULEAPI_AUTORUN,
+				any,
+				perr) ||
+			!PrefTakeUint(*remote_controls_obj,
+				g,
+				"amuleapi_port",
+				EC_TAG_AMULEAPI_PORT,
+				65535,
+				any,
+				perr) ||
+			!PrefTakeString(
+				*remote_controls_obj, g, "amuleapi_bind", EC_TAG_AMULEAPI_BIND, any, perr) ||
+			!PrefTakePassword(*remote_controls_obj,
+				g,
+				"webserver_password",
+				EC_TAG_PASSWD_HASH,
+				any,
+				perr) ||
+			!PrefTakePassword(*remote_controls_obj,
+				g,
+				"amuleapi_password",
+				EC_TAG_AMULEAPI_PASSWD,
+				any,
+				perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		// webserver_guest_enabled + webserver_guest_password share one EC
+		// tag (EC_TAG_WEBSERVER_GUEST carries the enable bool as its value
+		// and the password as a child), so pack them together to avoid two
+		// conflicting tags. When only the password is given, the enable
+		// bit falls back to the current snapshot value.
+		{
+			const auto en_it = remote_controls_obj->find("webserver_guest_enabled");
+			const auto pw_it = remote_controls_obj->find("webserver_guest_password");
+			const bool has_en = en_it != remote_controls_obj->end();
+			const bool has_pw = pw_it != remote_controls_obj->end();
+			if (has_en || has_pw) {
+				if (has_en && !en_it->second.is<bool>()) {
+					return ErrorResponse(
+						400, "bad_request", "webserver_guest_enabled must be a bool");
+				}
+				if (has_pw && !pw_it->second.is<std::string>()) {
+					return ErrorResponse(400,
+						"bad_request",
+						"webserver_guest_password must be a string");
+				}
+				const bool enabled =
+					has_en ? en_it->second.get<bool>()
+					       : m_state.Preferences()
+							 .remote_controls.webserver_guest_enabled;
+				CECTag guest(
+					EC_TAG_WEBSERVER_GUEST, static_cast<std::uint8_t>(enabled ? 1 : 0));
+				if (has_pw) {
+					const wxString md5hex = MD5Sum(
+						wxString::FromUTF8(pw_it->second.get<std::string>().c_str()))
+									.GetHash();
+					CMD4Hash h;
+					if (HashFromHex(std::string(md5hex.utf8_str()), h)) {
+						guest.AddTag(CECTag(EC_TAG_PASSWD_HASH, h));
+					}
+				}
+				g.AddTag(guest);
+				any = true;
+			}
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (online_signature_obj) {
+		CECTag g(EC_TAG_PREFS_ONLINESIG, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeBool(*online_signature_obj, g, "enabled", EC_TAG_ONLINESIG_ENABLED, any, perr) ||
+			!PrefTakeString(*online_signature_obj,
+				g,
+				"directory",
+				EC_TAG_ONLINESIG_DIRECTORY,
+				any,
+				perr) ||
+			!PrefTakeUint(*online_signature_obj,
+				g,
+				"update_frequency",
+				EC_TAG_ONLINESIG_UPDATE,
+				kU32Max,
+				any,
+				perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (core_tweaks_obj) {
+		CECTag g(EC_TAG_PREFS_CORETWEAKS, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeUint(*core_tweaks_obj,
+			    g,
+			    "max_conn_per_five",
+			    EC_TAG_CORETW_MAX_CONN_PER_FIVE,
+			    kU32Max,
+			    any,
+			    perr) ||
+			!PrefTakeBool(*core_tweaks_obj, g, "verbose", EC_TAG_CORETW_VERBOSE, any, perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"filebuffer",
+				EC_TAG_CORETW_FILEBUFFER,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"ul_queue",
+				EC_TAG_CORETW_UL_QUEUE,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"srv_keepalive_timeout",
+				EC_TAG_CORETW_SRV_KEEPALIVE_TIMEOUT,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"kad_max_searches",
+				EC_TAG_CORETW_KAD_MAX_SEARCHES,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"kad_reask_ms",
+				EC_TAG_CORETW_KAD_REASK_MS,
+				kU32Max,
+				any,
+				perr) ||
+			!PrefTakeUint(*core_tweaks_obj,
+				g,
+				"source_reask_ms",
+				EC_TAG_CORETW_SOURCE_REASK_MS,
+				kU32Max,
+				any,
+				perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	if (kademlia_obj) {
+		CECTag g(EC_TAG_PREFS_KADEMLIA, static_cast<std::uint32_t>(0));
+		bool any = false;
+		if (!PrefTakeString(*kademlia_obj, g, "update_url", EC_TAG_KADEMLIA_UPDATE_URL, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
+			any_change = true;
+		}
+	}
+
+	// [IP2Country] (#440). `supported` and the status fields are read-only
+	// (silently ignored if sent, like other read-only prefs). `source` is
+	// an enum string, validated + mapped to the uint8 the daemon's Apply()
+	// casts back to CPreferences::GeoIPSource. `update_now` is a write-only
+	// trigger (never echoed on GET) that kicks a manual DB refresh.
+	if (ip2country_obj) {
+		CECTag g(EC_TAG_PREFS_IP2COUNTRY, static_cast<std::uint32_t>(0));
+		bool any = false;
+		{
+			const auto it = ip2country_obj->find("source");
+			if (it != ip2country_obj->end()) {
+				if (!it->second.is<std::string>()) {
+					return ErrorResponse(
+						400, "bad_request", "ip2country.source must be a string");
+				}
+				const std::string &v = it->second.get<std::string>();
+				std::uint8_t src = 0;
+				if (v == "dbip") {
+					src = 0;
+				} else if (v == "maxmind") {
+					src = 1;
+				} else if (v == "custom") {
+					src = 2;
+				} else {
+					return ErrorResponse(400,
+						"bad_request",
+						"ip2country.source must be one of dbip, maxmind, custom");
+				}
+				g.AddTag(CECTag(EC_TAG_IP2COUNTRY_SOURCE, src));
+				any = true;
+			}
+		}
+		if (!PrefTakeBool(*ip2country_obj, g, "enabled", EC_TAG_IP2COUNTRY_ENABLED, any, perr) ||
+			!PrefTakeString(
+				*ip2country_obj, g, "custom_url", EC_TAG_IP2COUNTRY_CUSTOM_URL, any, perr) ||
+			!PrefTakeString(*ip2country_obj,
+				g,
+				"maxmind_license",
+				EC_TAG_IP2COUNTRY_MAXMIND_LICENSE,
+				any,
+				perr) ||
+			!PrefTakeBool(*ip2country_obj,
+				g,
+				"auto_update",
+				EC_TAG_IP2COUNTRY_AUTO_UPDATE,
+				any,
+				perr) ||
+			!PrefTakeBool(
+				*ip2country_obj, g, "update_now", EC_TAG_IP2COUNTRY_UPDATE_NOW, any, perr)) {
+			return ErrorResponse(400, "bad_request", perr.c_str());
+		}
+		if (any) {
+			ec_req->AddTag(g);
 			any_change = true;
 		}
 	}
@@ -5030,50 +6340,7 @@ CHttpServer::Response CApiDispatcher::HandlePreferencesPatch(const CHttpServer::
 	r.status = 200;
 	r.content_type = "application/json";
 	CJsonWriter w;
-	w.BeginObject();
-	w.Key("general");
-	w.BeginObject();
-	w.Key("nickname");
-	w.ValueString(wxString::FromUTF8(p.nickname.c_str()));
-	w.Key("user_hash");
-	w.ValueString(wxString::FromUTF8(p.user_hash.c_str()));
-	w.Key("host_name");
-	w.ValueString(wxString::FromUTF8(p.host_name.c_str()));
-	w.Key("check_new_version");
-	w.ValueBool(p.check_new_version);
-	w.EndObject();
-	w.Key("connection");
-	w.BeginObject();
-	w.Key("max_upload_kbps");
-	w.ValueInt(static_cast<int64_t>(p.max_upload_kbps));
-	w.Key("max_download_kbps");
-	w.ValueInt(static_cast<int64_t>(p.max_download_kbps));
-	w.Key("max_upload_cap_kbps");
-	w.ValueInt(static_cast<int64_t>(p.max_upload_cap_kbps));
-	w.Key("max_download_cap_kbps");
-	w.ValueInt(static_cast<int64_t>(p.max_download_cap_kbps));
-	w.Key("slot_allocation");
-	w.ValueInt(static_cast<int64_t>(p.slot_allocation));
-	w.Key("tcp_port");
-	w.ValueInt(static_cast<int64_t>(p.tcp_port));
-	w.Key("udp_port");
-	w.ValueInt(static_cast<int64_t>(p.udp_port));
-	w.Key("udp_disabled");
-	w.ValueBool(p.udp_disabled);
-	w.Key("max_sources_per_file");
-	w.ValueInt(static_cast<int64_t>(p.max_sources_per_file));
-	w.Key("max_connections");
-	w.ValueInt(static_cast<int64_t>(p.max_connections));
-	w.Key("autoconnect");
-	w.ValueBool(p.autoconnect);
-	w.Key("reconnect");
-	w.ValueBool(p.reconnect);
-	w.Key("network_ed2k");
-	w.ValueBool(p.network_ed2k);
-	w.Key("network_kad");
-	w.ValueBool(p.network_kad);
-	w.EndObject();
-	w.EndObject();
+	WritePreferencesBody(w, p);
 	FinalizeJsonBody(w, r);
 	return r;
 }
@@ -6442,12 +7709,17 @@ CHttpServer::Response CApiDispatcher::HandleSearchDownload(
 		return ErrorResponse(400, "bad_request", "`{hash}` must be a 32-char hex MD4");
 	}
 
-	// Optional body: {"category": uint8}. amulegui's
+	// Optional body: {"category": uint8, "ecid": uint32}. amulegui's
 	// CDownQueueRem::AddSearchToDownload defaults to category 0
 	// when none is supplied; we mirror that. The body itself is
 	// optional — clients that don't care about category POST with
-	// no body and get the default download path.
+	// no body and get the default download path. `ecid` (issue #431)
+	// selects one same-hash/different-name grouped child (from a result's
+	// `children[].ecid`) so it downloads under that chosen filename;
+	// omitted => the parent (first result matching the hash).
 	std::uint8_t category = 0;
+	bool has_ecid = false;
+	std::uint32_t ecid = 0;
 	if (!req.body.empty()) {
 		picojson::value root;
 		std::string parse_err;
@@ -6467,14 +7739,32 @@ CHttpServer::Response CApiDispatcher::HandleSearchDownload(
 			}
 			category = static_cast<std::uint8_t>(v);
 		}
+		const auto eit = obj.find("ecid");
+		if (eit != obj.end()) {
+			if (!eit->second.is<double>()) {
+				return ErrorResponse(
+					400, "bad_request", "`ecid` must be a non-negative integer");
+			}
+			const double v = eit->second.get<double>();
+			if (v < 0 || v > 4294967295.0) {
+				return ErrorResponse(400, "bad_request", "`ecid` out of range");
+			}
+			ecid = static_cast<std::uint32_t>(v);
+			has_ecid = true;
+		}
 	}
 
 	// amuled accepts the result hash as the partfile-tag's int
 	// payload (matches amule-remote-gui.cpp:2230). amuled looks up
-	// the hash in its searchlist; if not present, returns FAILED.
+	// the hash in its searchlist; if not present, returns FAILED. When
+	// an `ecid` selector is supplied, it rides as an EC_TAG_SEARCHFILE
+	// child and amuled downloads that specific grouped result instead.
 	std::unique_ptr<CECPacket> ec_req(new CECPacket(EC_OP_DOWNLOAD_SEARCH_RESULT));
 	CECTag hash_tag(EC_TAG_PARTFILE, file_hash);
 	hash_tag.AddTag(CECTag(EC_TAG_PARTFILE_CAT, category));
+	if (has_ecid) {
+		hash_tag.AddTag(CECTag(EC_TAG_SEARCHFILE, ecid));
+	}
 	ec_req->AddTag(hash_tag);
 
 	const CECPacket *ec_resp = m_app.SendRecvSerialized(ec_req.get());

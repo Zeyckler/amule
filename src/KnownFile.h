@@ -126,6 +126,11 @@ public:
 	void AddNote(Kademlia::CEntry *pEntry);
 	const CKadEntryPtrList &getNotes() const { return m_kadNotes; }
 
+	// True while an on-demand Kad NOTES lookup for this file's comments/ratings
+	// is in flight. Set by RequestKadNoteSearch, cleared when the CSearch ends.
+	void SetKadCommentSearchRunning(bool running) { m_kadCommentSearchRunning = running; }
+	bool IsKadCommentSearchRunning() const { return m_kadCommentSearchRunning; }
+
 	/* Comment and rating */
 	virtual const wxString &GetFileComment() const { return m_strComment; }
 	virtual int8 GetFileRating() const { return m_iRating; }
@@ -147,6 +152,7 @@ protected:
 	int8 m_iUserRating;
 	ArrayOfCTag m_taglist;
 	CKadEntryPtrList m_kadNotes;
+	bool m_kadCommentSearchRunning;
 
 private:
 	uint64 m_nFileSize;
@@ -159,6 +165,7 @@ class CFile;
 class CKnownFile : public CAbstractFile, public CECID
 {
 	friend class CHashingTask;
+	friend class CVerifyLocalDataTask;
 
 public:
 	CKnownFile();
@@ -231,7 +238,22 @@ public:
 	uint16 GetQueuedCount() const { return m_queuedCount; }
 #else
 	uint16 GetQueuedCount() const { return (uint16)m_ClientUploadList.size(); }
+	// Live upload activity for this shared file (issue #466), summarised
+	// from m_ClientUploadList — the upload-side analogue of the download
+	// speed / transferring-source counts. Core-only: amulegui receives
+	// these over EC rather than computing them.
+	uint32 GetUploadDatarate() const;          // sum of per-client upload speed (B/s)
+	uint16 GetTransferringClientCount() const; // clients currently US_UPLOADING
 #endif
+
+	// Timestamp of the last time data was uploaded for this file, and when
+	// the file was completed / first shared (issue #466). Both persisted in
+	// known.met (FT_LASTUPLOADED / FT_SHAREDSINCE); 0 = unknown. Available
+	// in both builds so the EC round-trip carries them to amulegui.
+	time_t GetLastUpload() const { return m_lastUploadDatetime; }
+	void SetLastUpload(time_t t) { m_lastUploadDatetime = t; }
+	time_t GetDateShared() const { return m_dateShared; }
+	void SetDateShared(time_t t) { m_dateShared = t; }
 
 	bool LoadHashsetFromFile(const CFileDataIO *file, bool checkhash);
 	void AddUploadingClient(CUpDownClient *client);
@@ -277,6 +299,13 @@ public:
 
 	bool PublishSrc();
 	bool PublishNotes();
+
+	// Start an on-demand Kad NOTES lookup to retrieve community ratings/comments
+	// for this file. Only meaningful for a file present in the shared list or the
+	// download queue (the request builder reads the file size from there). Returns
+	// false if Kad is unavailable, a lookup is already running, or the file is not
+	// eligible. On amulegui this is a no-op stub — the GUI triggers it over EC.
+	bool RequestKadNoteSearch();
 
 	// Nonzero when this file has verified media metadata attached
 	// (probed by MediaProbe at share-add time). Derived from tag
@@ -330,6 +359,13 @@ public:
 	void ClearPriority();
 
 	time_t m_lastDateChanged;
+
+	// Live upload activity (issue #466), persisted in known.met so it
+	// survives restarts. m_lastUploadDatetime is stamped whenever data is
+	// sent for this file (CFileStatistic::AddTransferred); m_dateShared is
+	// stamped once when the file is completed or first shared. 0 = unknown.
+	time_t m_lastUploadDatetime;
+	time_t m_dateShared;
 
 	// "Last time aMule saw this exact (name, date, size) match a real
 	// file." Refreshed by CKnownFileList::FindKnownFile and the

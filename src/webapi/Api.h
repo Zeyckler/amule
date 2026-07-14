@@ -105,6 +105,8 @@ private:
 	CHttpServer::Response HandleDownloadDetail(const CHttpServer::Request &, const std::string &key);
 	// per-source comments/ratings list. `key` = 32-char MD4 hash.
 	CHttpServer::Response HandleDownloadComments(const CHttpServer::Request &, const std::string &key);
+	CHttpServer::Response HandleDownloadCommentsKadSearch(
+		const CHttpServer::Request &, const std::string &key);
 	// source-reported filenames + counts. `key` = 32-char MD4 hash.
 	CHttpServer::Response HandleDownloadFilenames(const CHttpServer::Request &, const std::string &key);
 	// A4AF source list (GET) + swap actions (POST). `key` = 32-char MD4 hash.
@@ -173,6 +175,7 @@ private:
 	CHttpServer::Response HandleSearchStop(const CHttpServer::Request &);
 	CHttpServer::Response HandleSearchDownload(const CHttpServer::Request &, const std::string &hash);
 	CHttpServer::Response HandleClients(const CHttpServer::Request &);
+	CHttpServer::Response HandleClientDetail(const CHttpServer::Request &, const std::string &ecid_str);
 	CHttpServer::Response HandleSharedList(const CHttpServer::Request &);
 	CHttpServer::Response HandleServers(const CHttpServer::Request &);
 	CHttpServer::Response HandleKad(const CHttpServer::Request &);

@@ -291,7 +291,9 @@ void MergeKnownFileDetail(const CECTag *t, FileSnapshot &f)
 	if (t->AssignIfExist(EC_TAG_KNOWNFILE_ON_QUEUE, q))
 		f.queued_count = q;
 	if (const CECTag *fn = t->GetTagByName(EC_TAG_KNOWNFILE_FILENAME))
-		f.knownfile_filename = std::string(fn->GetStringData().utf8_str());
+		f.part_met_basename = std::string(fn->GetStringData().utf8_str());
+	if (const CECTag *pathTag = t->GetTagByName(EC_TAG_KNOWNFILE_PATH))
+		f.on_disk_dir = std::string(pathTag->GetStringData().utf8_str());
 	// The user's own comment + rating (issue #419).
 	if (const CECTag *cm = t->GetTagByName(EC_TAG_KNOWNFILE_COMMENT))
 		f.comment = std::string(cm->GetStringData().utf8_str());
@@ -459,6 +461,10 @@ void MergePartFileTag(const CEC_PartFile_Tag *pf, FileSnapshot &f, bool is_new)
 			c.comment = std::string(kids[i + 3]->GetStringData().utf8_str());
 			f.download.source_comments.push_back(std::move(c));
 		}
+	}
+	// Whether an on-demand Kad notes lookup is currently running (issue #434).
+	if (const CECTag *ks = pf->GetTagByName(EC_TAG_PARTFILE_KAD_COMMENT_SEARCHING)) {
+		f.download.kad_comment_searching = ks->GetInt() != 0;
 	}
 	// Source-reported filenames (issue #420). amuled delta-encodes the
 	// container keyed by a stable per-name id: a child carrying a name
@@ -677,6 +683,32 @@ std::string FormatClientIpv4(std::uint32_t ip_he)
 	return std::string(buf);
 }
 
+// Map EC_TAG_CLIENT_FROM (ESourceFrom, Constants.h) to a stable
+// lowercase token, mirroring the GUI's Origin column without leaking
+// the daemon locale. Local/remote server both collapse to "server".
+std::string SourceOriginName(std::uint32_t from)
+{
+	switch (from) {
+	case SF_LOCAL_SERVER:
+	case SF_REMOTE_SERVER:
+		return "server";
+	case SF_KADEMLIA:
+		return "kad";
+	case SF_SOURCE_EXCHANGE:
+		return "source_exchange";
+	case SF_PASSIVE:
+		return "passive";
+	case SF_LINK:
+		return "link";
+	case SF_SOURCE_SEEDS:
+		return "source_seeds";
+	case SF_SEARCH_RESULT:
+		return "search_result";
+	default:
+		return "unknown";
+	}
+}
+
 // Merge a `CEC_UpDownClient_Tag` into an existing ClientSnapshot.
 // On a cache-miss the caller pre-populates ecid + hashes; on a hit
 // the AssignIfExist pattern leaves cached values intact when the
@@ -701,6 +733,11 @@ void MergeClientTag(const CEC_UpDownClient_Tag *c,
 		std::uint16_t v = 0;
 		if (c->AssignIfExist(EC_TAG_CLIENT_USER_PORT, v))
 			cs.port = v;
+	}
+	// Peer country ISO code (#439). Tag-present (even empty) is the daemon's
+	// authoritative answer; tag-absent leaves the cached value intact.
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CLIENT_COUNTRY)) {
+		cs.country_code = std::string(t->GetStringData().utf8_str());
 	}
 	std::uint32_t soft_code = static_cast<std::uint32_t>(SO_UNKNOWN);
 	if (c->AssignIfExist(EC_TAG_CLIENT_SOFTWARE, soft_code))
@@ -841,6 +878,78 @@ void MergeClientTag(const CEC_UpDownClient_Tag *c,
 		if (c->AssignIfExist(EC_TAG_CLIENT_FRIEND_SLOT, v))
 			cs.friend_slot = v;
 	}
+
+	// --- Detail-only fields (issue #422) -----------------------------
+	// All already on the INC_UPDATE wire (ECSpecialCoreTags.cpp) but not
+	// surfaced by the list; the detail endpoint serializes them.
+	{
+		std::uint32_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_USER_ID, v)) {
+			cs.user_id_hybrid = v;
+			// A LowID peer has a hybrid id below 0x1000000 (IsLowID(),
+			// NetworkFunctions.h); inline the ed2k-stable ceiling rather
+			// than drag the core header into the webapi decoder.
+			const std::uint32_t kLowIdCeiling = 16777216u;
+			cs.high_id = v >= kLowIdCeiling;
+		}
+	}
+	{
+		std::uint32_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_SERVER_IP, v))
+			cs.server_ip = FormatClientIpv4(v);
+	}
+	{
+		std::uint16_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_SERVER_PORT, v))
+			cs.server_port = v;
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CLIENT_SERVER_NAME)) {
+		cs.server_name = std::string(t->GetStringData().utf8_str());
+	}
+	{
+		std::uint16_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_KAD_PORT, v))
+			cs.kad_port = v;
+	}
+	{
+		std::uint32_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_FROM, v))
+			cs.source_origin = SourceOriginName(v);
+	}
+	// PARTFILE_NAME rides inside the client tag only while the peer is
+	// downloading from us (ECSpecialCoreTags.cpp:331); leave the cached
+	// value when absent.
+	if (const CECTag *t = c->GetTagByName(EC_TAG_PARTFILE_NAME)) {
+		cs.upload_file_name = std::string(t->GetStringData().utf8_str());
+	}
+	{
+		std::uint32_t v = 0;
+		if (c->AssignIfExist(EC_TAG_CLIENT_AVAILABLE_PARTS, v)) {
+			cs.available_parts = v;
+			cs.has_available_parts = true;
+		}
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CLIENT_MOD_VERSION)) {
+		cs.mod_version = std::string(t->GetStringData().utf8_str());
+	}
+	{
+		bool v = false;
+		if (c->AssignIfExist(EC_TAG_CLIENT_DISABLE_VIEW_SHARED, v))
+			cs.view_shared_disabled = v;
+	}
+
+	// --- Friend status + DL/UP modifier (issue #423, new EC tags) ----
+	// Absent when talking to a core built before #423 (older peers just
+	// don't send them); the AssignIfExist / GetTagByName guards leave
+	// the defaults in place.
+	{
+		bool v = false;
+		if (c->AssignIfExist(EC_TAG_CLIENT_IS_FRIEND, v))
+			cs.is_friend = v;
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CLIENT_SCORE_RATIO)) {
+		cs.dl_up_modifier = t->GetDoubleData();
+	}
 }
 
 void MergeSharedTag(const CEC_SharedFile_Tag *sf, FileSnapshot &f)
@@ -907,6 +1016,27 @@ void MergeSharedTag(const CEC_SharedFile_Tag *sf, FileSnapshot &f)
 			f.shared.priority = PriorityName(pr, sh_auto);
 			f.shared.priority_auto = sh_auto;
 		}
+	}
+	// Live upload activity + timestamps (issue #466).
+	{
+		std::uint32_t v = f.shared.upload_speed_bps;
+		if (sf->AssignIfExist(EC_TAG_KNOWNFILE_UPLOAD_SPEED, v))
+			f.shared.upload_speed_bps = v;
+	}
+	{
+		std::uint16_t v = f.shared.uploading_count;
+		if (sf->AssignIfExist(EC_TAG_KNOWNFILE_UPLOADING_COUNT, v))
+			f.shared.uploading_count = v;
+	}
+	{
+		std::uint32_t v = f.shared.last_upload;
+		if (sf->AssignIfExist(EC_TAG_KNOWNFILE_LAST_UPLOAD, v))
+			f.shared.last_upload = v;
+	}
+	{
+		std::uint32_t v = f.shared.shared_since;
+		if (sf->AssignIfExist(EC_TAG_KNOWNFILE_SHARED_SINCE, v))
+			f.shared.shared_since = v;
 	}
 	// Base CKnownFile detail tags (aich_hash, queued_count, path source).
 	MergeKnownFileDetail(sf, f);
@@ -1334,6 +1464,11 @@ void MergeServerTag(const CEC_Server_Tag *st, ServerSnapshot &s, bool is_new)
 		const std::string v = std::string(st->ServerVersion(&tmp).utf8_str());
 		if (is_new || !v.empty())
 			s.version = v;
+	}
+	// Server host country ISO code (#440). Tag-present (even empty) is the
+	// daemon's authoritative answer; tag-absent leaves the cached value intact.
+	if (const CECTag *t = st->GetTagByName(EC_TAG_SERVER_COUNTRY)) {
+		s.country_code = std::string(t->GetStringData().utf8_str());
 	}
 	// IP + port shipping shape varies by EC detail level:
 	//  * FULL/WEB/UPDATE (webserver, amulecmd) pack them into the
@@ -1770,6 +1905,16 @@ void ApplySearchFull(const CECPacket *resp, std::map<std::uint32_t, SearchResult
 				r.complete_source_count = v;
 		}
 		r.already_have = sf->AlreadyHave();
+		// Grouping (issue #431): a child hit carries its parent's ECID in
+		// EC_TAG_SEARCH_PARENT. Recorded here; folded into the parent's
+		// children[] in the second pass below.
+		{
+			std::uint32_t v = 0;
+			if (sf->AssignIfExist(EC_TAG_SEARCH_PARENT, v)) {
+				r.parent_ecid = v;
+				r.has_parent = true;
+			}
+		}
 		{
 			std::uint8_t v = 0;
 			if (sf->AssignIfExist(EC_TAG_KNOWNFILE_RATING, v))
@@ -1783,7 +1928,64 @@ void ApplySearchFull(const CECPacket *resp, std::map<std::uint32_t, SearchResult
 		}
 		// File type, computed from the filename (no EC data needed).
 		r.type = SearchTypeToken(r.name);
+		// Media metadata (issue #430): present only when the hit carried
+		// FT_MEDIA_* tags (known/probed locally). Any present tag marks
+		// has_media so the API emits the `media` object.
+		{
+			std::uint32_t v = 0;
+			if (sf->AssignIfExist(EC_TAG_KNOWNFILE_MEDIA_LENGTH, v)) {
+				r.media.length_s = v;
+				r.has_media = true;
+			}
+			if (sf->AssignIfExist(EC_TAG_KNOWNFILE_MEDIA_BITRATE, v)) {
+				r.media.bitrate = v;
+				r.has_media = true;
+			}
+		}
+		if (const CECTag *x = sf->GetTagByName(EC_TAG_KNOWNFILE_MEDIA_CODEC)) {
+			r.media.codec = std::string(x->GetStringData().utf8_str());
+			r.has_media = true;
+		}
+		if (const CECTag *x = sf->GetTagByName(EC_TAG_KNOWNFILE_MEDIA_ARTIST)) {
+			r.media.artist = std::string(x->GetStringData().utf8_str());
+			r.has_media = true;
+		}
+		if (const CECTag *x = sf->GetTagByName(EC_TAG_KNOWNFILE_MEDIA_ALBUM)) {
+			r.media.album = std::string(x->GetStringData().utf8_str());
+			r.has_media = true;
+		}
+		if (const CECTag *x = sf->GetTagByName(EC_TAG_KNOWNFILE_MEDIA_TITLE)) {
+			r.media.title = std::string(x->GetStringData().utf8_str());
+			r.has_media = true;
+		}
 		cache.emplace(r.ecid, std::move(r));
+	}
+
+	// Second pass (issue #431): fold each child into its parent's
+	// children[] and drop it from the top-level set, so the API serves
+	// one parent row per hash+size with the alternative filenames nested.
+	// A child whose parent isn't in the set (shouldn't happen — the core
+	// emits the parent before its children) is left as a top-level row so
+	// nothing is silently lost.
+	std::vector<std::uint32_t> folded;
+	for (auto &kv : cache) {
+		SearchResult &child = kv.second;
+		if (!child.has_parent)
+			continue;
+		auto pit = cache.find(child.parent_ecid);
+		if (pit == cache.end())
+			continue;
+		SearchResult::Child c;
+		c.ecid = child.ecid;
+		c.name = child.name;
+		c.hash = child.hash;
+		c.source_count = child.source_count;
+		c.complete_source_count = child.complete_source_count;
+		pit->second.children.push_back(std::move(c));
+		folded.push_back(kv.first);
+	}
+	for (std::uint32_t ecid : folded) {
+		cache.erase(ecid);
 	}
 }
 
@@ -1864,6 +2066,9 @@ void ParseGeneralPrefs(const CECTag *gen, PreferencesSnapshot &out)
 	if (const CECTag *t = gen->GetTagByName(EC_TAG_GENERAL_VERSION_CHECK_AVAILABLE)) {
 		out.version_check_available = t->GetInt() != 0;
 	}
+	if (const CECTag *t = gen->GetTagByName(EC_TAG_GENERAL_UPNP_AVAILABLE)) {
+		out.upnp_available = t->GetInt() != 0;
+	}
 }
 
 void ParseConnectionPrefs(const CECTag *conn, PreferencesSnapshot &out)
@@ -1895,12 +2100,282 @@ void ParseConnectionPrefs(const CECTag *conn, PreferencesSnapshot &out)
 	out.reconnect = conn->GetTagByName(EC_TAG_CONN_RECONNECT) != nullptr;
 	out.network_ed2k = conn->GetTagByName(EC_TAG_NETWORK_ED2K) != nullptr;
 	out.network_kad = conn->GetTagByName(EC_TAG_NETWORK_KADEMLIA) != nullptr;
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_BIND_ADDRESS)) {
+		out.bind_address = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_BIND_INTERFACE)) {
+		out.bind_interface = std::string(t->GetStringData().utf8_str());
+	}
+	// Proxy (password is write-only: deliberately not read here).
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_ENABLE)) {
+		out.proxy_enabled = t->GetInt() != 0;
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_TYPE)) {
+		out.proxy_type = static_cast<std::int32_t>(t->GetInt());
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_HOST)) {
+		out.proxy_host = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_PORT)) {
+		out.proxy_port = static_cast<std::uint16_t>(t->GetInt());
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_AUTH)) {
+		out.proxy_auth = t->GetInt() != 0;
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_PROXY_USER)) {
+		out.proxy_user = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_UPNP_ENABLED)) {
+		out.upnp_enabled = t->GetInt() != 0;
+	}
+	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_UPNP_TCP_PORT)) {
+		out.upnp_tcp_port = static_cast<std::uint16_t>(t->GetInt());
+	}
 
 	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_MAX_FILE_SOURCES)) {
 		out.max_sources_per_file = static_cast<std::uint32_t>(t->GetInt());
 	}
 	if (const CECTag *t = conn->GetTagByName(EC_TAG_CONN_MAX_CONN)) {
 		out.max_connections = static_cast<std::uint32_t>(t->GetInt());
+	}
+}
+
+// --- Extended EC-carried preference categories (issue #437) ----------
+//
+// Boolean encoding follows the core serializer (ECSpecialMuleTags.cpp):
+// most bools are emitted as a bare CECEmptyTag only when true, so
+// presence == true; a few (directories.share_hidden/auto_rescan/
+// follow_symlinks/exclude_regex, security.can_see_shares) are emitted
+// as a value tag every time, so they read GetInt() != 0.
+
+void ParseDirectoriesPrefs(const CECTag *d, PreferencesSnapshot &out)
+{
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_INCOMING)) {
+		out.directories.incoming = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_TEMP)) {
+		out.directories.temp = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *shared = d->GetTagByName(EC_TAG_DIRECTORIES_SHARED)) {
+		out.directories.shared.clear();
+		for (const CECTag &child : *shared) {
+			if (child.GetTagName() == EC_TAG_STRING)
+				out.directories.shared.emplace_back(child.GetStringData().utf8_str());
+		}
+	}
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_SHARE_HIDDEN))
+		out.directories.share_hidden = t->GetInt() != 0;
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_AUTO_RESCAN))
+		out.directories.auto_rescan = t->GetInt() != 0;
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_FOLLOW_SYMLINKS))
+		out.directories.follow_symlinks = t->GetInt() != 0;
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_EXCLUDE_PATTERNS)) {
+		out.directories.exclude_patterns = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = d->GetTagByName(EC_TAG_DIRECTORIES_EXCLUDE_REGEX))
+		out.directories.exclude_regex = t->GetInt() != 0;
+}
+
+void ParseFilesPrefs(const CECTag *f, PreferencesSnapshot &out)
+{
+	out.files.ich_enabled = f->GetTagByName(EC_TAG_FILES_ICH_ENABLED) != nullptr;
+	out.files.aich_trust = f->GetTagByName(EC_TAG_FILES_AICH_TRUST) != nullptr;
+	out.files.new_paused = f->GetTagByName(EC_TAG_FILES_NEW_PAUSED) != nullptr;
+	out.files.new_auto_dl_prio = f->GetTagByName(EC_TAG_FILES_NEW_AUTO_DL_PRIO) != nullptr;
+	out.files.new_auto_ul_prio = f->GetTagByName(EC_TAG_FILES_NEW_AUTO_UL_PRIO) != nullptr;
+	out.files.preview_prio = f->GetTagByName(EC_TAG_FILES_PREVIEW_PRIO) != nullptr;
+	out.files.start_next_paused = f->GetTagByName(EC_TAG_FILES_START_NEXT_PAUSED) != nullptr;
+	out.files.resume_same_cat = f->GetTagByName(EC_TAG_FILES_RESUME_SAME_CAT) != nullptr;
+	out.files.save_sources = f->GetTagByName(EC_TAG_FILES_SAVE_SOURCES) != nullptr;
+	out.files.extract_metadata = f->GetTagByName(EC_TAG_FILES_EXTRACT_METADATA) != nullptr;
+	out.files.alloc_full_size = f->GetTagByName(EC_TAG_FILES_ALLOC_FULL_SIZE) != nullptr;
+	out.files.check_free_space = f->GetTagByName(EC_TAG_FILES_CHECK_FREE_SPACE) != nullptr;
+	if (const CECTag *t = f->GetTagByName(EC_TAG_FILES_MIN_FREE_SPACE)) {
+		out.files.min_free_space_mb = static_cast<std::uint32_t>(t->GetInt());
+	}
+	out.files.create_normal = f->GetTagByName(EC_TAG_FILES_CREATE_NORMAL) != nullptr;
+	out.files.start_next_alphabetical = f->GetTagByName(EC_TAG_FILES_START_NEXT_ALPHA) != nullptr;
+	out.files.media_metadata_enabled = f->GetTagByName(EC_TAG_FILES_MEDIA_METADATA_ENABLED) != nullptr;
+	if (const CECTag *t = f->GetTagByName(EC_TAG_FILES_MEDIA_FFPROBE_PATH)) {
+		out.files.ffprobe_path = std::string(t->GetStringData().utf8_str());
+	}
+}
+
+void ParseServersPrefs(const CECTag *s, PreferencesSnapshot &out)
+{
+	out.servers.remove_dead = s->GetTagByName(EC_TAG_SERVERS_REMOVE_DEAD) != nullptr;
+	if (const CECTag *t = s->GetTagByName(EC_TAG_SERVERS_DEAD_SERVER_RETRIES)) {
+		out.servers.dead_server_retries = static_cast<std::uint32_t>(t->GetInt());
+	}
+	out.servers.auto_update = s->GetTagByName(EC_TAG_SERVERS_AUTO_UPDATE) != nullptr;
+	out.servers.add_from_server = s->GetTagByName(EC_TAG_SERVERS_ADD_FROM_SERVER) != nullptr;
+	out.servers.add_from_client = s->GetTagByName(EC_TAG_SERVERS_ADD_FROM_CLIENT) != nullptr;
+	out.servers.use_score_system = s->GetTagByName(EC_TAG_SERVERS_USE_SCORE_SYSTEM) != nullptr;
+	out.servers.smart_id_check = s->GetTagByName(EC_TAG_SERVERS_SMART_ID_CHECK) != nullptr;
+	out.servers.safe_server_connect = s->GetTagByName(EC_TAG_SERVERS_SAFE_SERVER_CONNECT) != nullptr;
+	out.servers.autoconn_static_only = s->GetTagByName(EC_TAG_SERVERS_AUTOCONN_STATIC_ONLY) != nullptr;
+	out.servers.manual_high_prio = s->GetTagByName(EC_TAG_SERVERS_MANUAL_HIGH_PRIO) != nullptr;
+	if (const CECTag *t = s->GetTagByName(EC_TAG_SERVERS_UPDATE_URL)) {
+		out.servers.update_url = std::string(t->GetStringData().utf8_str());
+	}
+}
+
+void ParseSecurityPrefs(const CECTag *s, PreferencesSnapshot &out)
+{
+	if (const CECTag *t = s->GetTagByName(EC_TAG_SECURITY_CAN_SEE_SHARES))
+		out.security.can_see_shares = t->GetInt() != 0;
+	out.security.ipfilter_clients = s->GetTagByName(EC_TAG_IPFILTER_CLIENTS) != nullptr;
+	out.security.ipfilter_servers = s->GetTagByName(EC_TAG_IPFILTER_SERVERS) != nullptr;
+	out.security.ipfilter_auto_update = s->GetTagByName(EC_TAG_IPFILTER_AUTO_UPDATE) != nullptr;
+	if (const CECTag *t = s->GetTagByName(EC_TAG_IPFILTER_UPDATE_URL)) {
+		out.security.ipfilter_update_url = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = s->GetTagByName(EC_TAG_IPFILTER_LEVEL)) {
+		out.security.ipfilter_level = static_cast<std::uint32_t>(t->GetInt());
+	}
+	out.security.ipfilter_filter_lan = s->GetTagByName(EC_TAG_IPFILTER_FILTER_LAN) != nullptr;
+	out.security.use_secident = s->GetTagByName(EC_TAG_SECURITY_USE_SECIDENT) != nullptr;
+	out.security.obfuscation_supported =
+		s->GetTagByName(EC_TAG_SECURITY_OBFUSCATION_SUPPORTED) != nullptr;
+	out.security.obfuscation_requested =
+		s->GetTagByName(EC_TAG_SECURITY_OBFUSCATION_REQUESTED) != nullptr;
+	out.security.obfuscation_required = s->GetTagByName(EC_TAG_SECURITY_OBFUSCATION_REQUIRED) != nullptr;
+	out.security.paranoid_filtering = s->GetTagByName(EC_TAG_IPFILTER_PARANOID) != nullptr;
+	out.security.use_system_ipfilter = s->GetTagByName(EC_TAG_IPFILTER_SYSTEM) != nullptr;
+}
+
+void ParseMessageFilterPrefs(const CECTag *m, PreferencesSnapshot &out)
+{
+	out.message_filter.enabled = m->GetTagByName(EC_TAG_MSGFILTER_ENABLED) != nullptr;
+	out.message_filter.all = m->GetTagByName(EC_TAG_MSGFILTER_ALL) != nullptr;
+	out.message_filter.friends = m->GetTagByName(EC_TAG_MSGFILTER_FRIENDS) != nullptr;
+	out.message_filter.secure = m->GetTagByName(EC_TAG_MSGFILTER_SECURE) != nullptr;
+	out.message_filter.by_keyword = m->GetTagByName(EC_TAG_MSGFILTER_BY_KEYWORD) != nullptr;
+	if (const CECTag *t = m->GetTagByName(EC_TAG_MSGFILTER_KEYWORDS)) {
+		out.message_filter.keywords = std::string(t->GetStringData().utf8_str());
+	}
+}
+
+void ParseRemoteControlsPrefs(const CECTag *rc, PreferencesSnapshot &out)
+{
+	out.remote_controls.webserver_enabled = rc->GetTagByName(EC_TAG_WEBSERVER_AUTORUN) != nullptr;
+	if (const CECTag *t = rc->GetTagByName(EC_TAG_WEBSERVER_PORT)) {
+		out.remote_controls.webserver_port = static_cast<std::uint32_t>(t->GetInt());
+	}
+	out.remote_controls.webserver_use_gzip = rc->GetTagByName(EC_TAG_WEBSERVER_USEGZIP) != nullptr;
+	if (const CECTag *t = rc->GetTagByName(EC_TAG_WEBSERVER_REFRESH)) {
+		out.remote_controls.webserver_refresh = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = rc->GetTagByName(EC_TAG_WEBSERVER_TEMPLATE)) {
+		out.remote_controls.webserver_template = std::string(t->GetStringData().utf8_str());
+	}
+	out.remote_controls.webserver_guest_enabled = rc->GetTagByName(EC_TAG_WEBSERVER_GUEST) != nullptr;
+	out.remote_controls.amuleapi_enabled = rc->GetTagByName(EC_TAG_AMULEAPI_AUTORUN) != nullptr;
+	if (const CECTag *t = rc->GetTagByName(EC_TAG_AMULEAPI_PORT)) {
+		out.remote_controls.amuleapi_port = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = rc->GetTagByName(EC_TAG_AMULEAPI_BIND)) {
+		out.remote_controls.amuleapi_bind = std::string(t->GetStringData().utf8_str());
+	}
+	// Passwords (EC_TAG_PASSWD_HASH / EC_TAG_AMULEAPI_PASSWD) are
+	// deliberately NOT read — write-only, never surfaced on GET.
+}
+
+void ParseOnlineSigPrefs(const CECTag *o, PreferencesSnapshot &out)
+{
+	out.online_signature.enabled = o->GetTagByName(EC_TAG_ONLINESIG_ENABLED) != nullptr;
+	if (const CECTag *t = o->GetTagByName(EC_TAG_ONLINESIG_DIRECTORY)) {
+		out.online_signature.directory = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = o->GetTagByName(EC_TAG_ONLINESIG_UPDATE)) {
+		out.online_signature.update_frequency = static_cast<std::uint32_t>(t->GetInt());
+	}
+}
+
+void ParseCoreTweaksPrefs(const CECTag *c, PreferencesSnapshot &out)
+{
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_MAX_CONN_PER_FIVE)) {
+		out.core_tweaks.max_conn_per_five = static_cast<std::uint32_t>(t->GetInt());
+	}
+	out.core_tweaks.verbose = c->GetTagByName(EC_TAG_CORETW_VERBOSE) != nullptr;
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_FILEBUFFER)) {
+		out.core_tweaks.filebuffer = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_UL_QUEUE)) {
+		out.core_tweaks.ul_queue = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_SRV_KEEPALIVE_TIMEOUT)) {
+		out.core_tweaks.srv_keepalive_timeout = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_KAD_MAX_SEARCHES)) {
+		out.core_tweaks.kad_max_searches = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_KAD_REASK_MS)) {
+		out.core_tweaks.kad_reask_ms = static_cast<std::uint32_t>(t->GetInt());
+	}
+	if (const CECTag *t = c->GetTagByName(EC_TAG_CORETW_SOURCE_REASK_MS)) {
+		out.core_tweaks.source_reask_ms = static_cast<std::uint32_t>(t->GetInt());
+	}
+}
+
+void ParseKademliaPrefs(const CECTag *k, PreferencesSnapshot &out)
+{
+	if (const CECTag *t = k->GetTagByName(EC_TAG_KADEMLIA_UPDATE_URL)) {
+		out.kademlia.update_url = std::string(t->GetStringData().utf8_str());
+	}
+}
+
+void ParseIP2CountryPrefs(const CECTag *ip, PreferencesSnapshot &out)
+{
+	// SUPPORTED is a value-encoded bool the daemon sets from its compile-
+	// time capability (true only on a GeoIP-capable build); the whole
+	// category is absent otherwise, leaving every field at its default.
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_SUPPORTED)) {
+		out.ip2country.supported = t->GetInt() != 0;
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_ENABLED)) {
+		out.ip2country.enabled = t->GetInt() != 0;
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_SOURCE)) {
+		// uint8 enum: CPreferences::GeoIPSource — DBIP=0, MaxMind=1,
+		// Custom=2. Anything else falls back to "dbip" (the enum's
+		// zero value) rather than surfacing a raw number.
+		switch (t->GetInt()) {
+		case 1:
+			out.ip2country.source = "maxmind";
+			break;
+		case 2:
+			out.ip2country.source = "custom";
+			break;
+		default:
+			out.ip2country.source = "dbip";
+			break;
+		}
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_CUSTOM_URL)) {
+		out.ip2country.custom_url = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_MAXMIND_LICENSE)) {
+		out.ip2country.maxmind_license = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_AUTO_UPDATE)) {
+		out.ip2country.auto_update = t->GetInt() != 0;
+	}
+	// Read-only live status — only filled by resolver-owning daemons.
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_LOADED_SOURCE)) {
+		out.ip2country.loaded_source = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_DB_PATH)) {
+		out.ip2country.db_path = std::string(t->GetStringData().utf8_str());
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_DB_LOADED)) {
+		out.ip2country.db_loaded = t->GetInt() != 0;
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_DOWNLOADING)) {
+		out.ip2country.downloading = t->GetInt() != 0;
+	}
+	if (const CECTag *t = ip->GetTagByName(EC_TAG_IP2COUNTRY_LAST_RESULT)) {
+		out.ip2country.last_result = std::string(t->GetStringData().utf8_str());
 	}
 }
 
@@ -1921,6 +2396,36 @@ void ParsePreferencesFromPacket(
 	}
 	if (const CECTag *conn = resp->GetTagByName(EC_TAG_PREFS_CONNECTIONS)) {
 		ParseConnectionPrefs(conn, out_prefs);
+	}
+	if (const CECTag *d = resp->GetTagByName(EC_TAG_PREFS_DIRECTORIES)) {
+		ParseDirectoriesPrefs(d, out_prefs);
+	}
+	if (const CECTag *f = resp->GetTagByName(EC_TAG_PREFS_FILES)) {
+		ParseFilesPrefs(f, out_prefs);
+	}
+	if (const CECTag *s = resp->GetTagByName(EC_TAG_PREFS_SERVERS)) {
+		ParseServersPrefs(s, out_prefs);
+	}
+	if (const CECTag *s = resp->GetTagByName(EC_TAG_PREFS_SECURITY)) {
+		ParseSecurityPrefs(s, out_prefs);
+	}
+	if (const CECTag *m = resp->GetTagByName(EC_TAG_PREFS_MESSAGEFILTER)) {
+		ParseMessageFilterPrefs(m, out_prefs);
+	}
+	if (const CECTag *rc = resp->GetTagByName(EC_TAG_PREFS_REMOTECTRL)) {
+		ParseRemoteControlsPrefs(rc, out_prefs);
+	}
+	if (const CECTag *o = resp->GetTagByName(EC_TAG_PREFS_ONLINESIG)) {
+		ParseOnlineSigPrefs(o, out_prefs);
+	}
+	if (const CECTag *c = resp->GetTagByName(EC_TAG_PREFS_CORETWEAKS)) {
+		ParseCoreTweaksPrefs(c, out_prefs);
+	}
+	if (const CECTag *k = resp->GetTagByName(EC_TAG_PREFS_KADEMLIA)) {
+		ParseKademliaPrefs(k, out_prefs);
+	}
+	if (const CECTag *ip = resp->GetTagByName(EC_TAG_PREFS_IP2COUNTRY)) {
+		ParseIP2CountryPrefs(ip, out_prefs);
 	}
 	if (const CECTag *cats = resp->GetTagByName(EC_TAG_PREFS_CATEGORIES)) {
 		for (CECTag::const_iterator it = cats->begin(); it != cats->end(); ++it) {

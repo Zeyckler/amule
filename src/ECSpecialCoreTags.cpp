@@ -31,6 +31,9 @@
 // removing everything from non-local builds.
 
 #include "amule.h"
+#ifdef ENABLE_IP2COUNTRY
+#include "IP2Country.h" // For CIP2Country (country tag serialisation, #439/#440)
+#endif
 #include "Server.h"        // Needed for CServer
 #include "PartFile.h"      // Needed for CPartFile
 #include "ServerConnect.h" // Needed for CServerConnect
@@ -97,6 +100,14 @@ CEC_Server_Tag::CEC_Server_Tag(const CServer *server, EC_DETAIL_LEVEL detail_lev
 		if (!(tmpStr = server->GetListName()).IsEmpty()) {
 			AddTag(CECTag(EC_TAG_SERVER_NAME, tmpStr));
 		}
+#ifdef ENABLE_IP2COUNTRY
+		// Server host country ISO code (#440). WEB / FULL fall through to here,
+		// so this covers the webserver, amulecmd and remote-detail paths.
+		if (theApp->GetIP2Country() && theApp->GetIP2Country()->IsEnabled()) {
+			AddTag(CECTag(EC_TAG_SERVER_COUNTRY,
+				theApp->GetIP2Country()->GetCountryCode(server->GetFullIP())));
+		}
+#endif
 	}
 }
 
@@ -116,6 +127,14 @@ CEC_Server_Tag::CEC_Server_Tag(const CServer *server, CValueMap *valuemap)
 	AddTag(EC_TAG_SERVER_USERS, server->GetUsers(), valuemap);
 	AddTag(EC_TAG_SERVER_USERS_MAX, server->GetMaxUsers(), valuemap);
 	AddTag(EC_TAG_SERVER_FILES, server->GetFiles(), valuemap);
+#ifdef ENABLE_IP2COUNTRY
+	// Server host country ISO code for the remote GUI (#440).
+	if (theApp->GetIP2Country() && theApp->GetIP2Country()->IsEnabled()) {
+		AddTag(EC_TAG_SERVER_COUNTRY,
+			theApp->GetIP2Country()->GetCountryCode(server->GetFullIP()),
+			valuemap);
+	}
+#endif
 }
 
 CEC_ConnState_Tag::CEC_ConnState_Tag(EC_DETAIL_LEVEL detail_level)
@@ -197,6 +216,10 @@ CEC_PartFile_Tag::CEC_PartFile_Tag(const CPartFile *file, EC_DETAIL_LEVEL detail
 	}
 	AddTag(sc, valuemap);
 
+	// Whether an on-demand Kad notes lookup is currently in flight for this file.
+	// Sent on updates too, so the remote GUI/REST can reflect start -> finish.
+	AddTag(EC_TAG_PARTFILE_KAD_COMMENT_SEARCHING, file->IsKadCommentSearchRunning(), valuemap);
+
 	if (detail_level == EC_DETAIL_UPDATE) {
 		return;
 	}
@@ -236,6 +259,16 @@ CEC_SharedFile_Tag::CEC_SharedFile_Tag(
 
 	AddTag(EC_TAG_KNOWNFILE_ON_QUEUE, file->GetQueuedCount(), valuemap);
 
+	// Live upload activity (issue #466). Emitted before the UPDATE
+	// early-return so they refresh every tick like the download-side
+	// speed/source counts. The speed + uploading count are computed from
+	// m_ClientUploadList (core-only); amulegui receives them over EC.
+#ifndef CLIENT_GUI
+	AddTag(EC_TAG_KNOWNFILE_UPLOAD_SPEED, file->GetUploadDatarate(), valuemap);
+	AddTag(EC_TAG_KNOWNFILE_UPLOADING_COUNT, file->GetTransferringClientCount(), valuemap);
+#endif
+	AddTag(EC_TAG_KNOWNFILE_LAST_UPLOAD, (uint32)file->GetLastUpload(), valuemap);
+
 	if (detail_level == EC_DETAIL_UPDATE) {
 		return;
 	}
@@ -248,6 +281,16 @@ CEC_SharedFile_Tag::CEC_SharedFile_Tag(
 		file->IsPartFile() ? static_cast<const CPartFile *>(file)->GetCachedPartMetBasename()
 				   : file->GetFilePath().GetPrintable(),
 		valuemap);
+	// The on-disk directory, always — the Temp dir for a partfile, the
+	// destination dir once completed. Unlike _FILENAME (which doubles as
+	// the ".part" basename for partfiles), this never changes meaning
+	// across the completed transition, so the REST API can expose an
+	// unambiguous `path` on /downloads and /shared (issue #417).
+	AddTag(EC_TAG_KNOWNFILE_PATH, file->GetFilePath().GetPrintable(), valuemap);
+
+	// When the file was completed / first shared (issue #466). Static once
+	// set, so it rides in the full-detail section rather than every tick.
+	AddTag(EC_TAG_KNOWNFILE_SHARED_SINCE, (uint32)file->GetDateShared(), valuemap);
 
 	AddTag(EC_TAG_PARTFILE_SIZE_FULL, file->GetFileSize(), valuemap);
 
@@ -289,6 +332,17 @@ CEC_UpDownClient_Tag::CEC_UpDownClient_Tag(
 	AddTag(CECTag(EC_TAG_CLIENT_SOFT_VER_STR, client->GetSoftVerStr()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_USER_IP, client->GetIP()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_USER_PORT, client->GetUserPort()), valuemap);
+#ifdef ENABLE_IP2COUNTRY
+	// Peer country ISO code resolved core-side (#439). Emitted whenever GeoIP
+	// is enabled + supported — even empty for an IP that doesn't resolve — so
+	// a frontend can treat tag-present as authoritative (possibly "unknown")
+	// and tag-absent as "no daemon GeoIP".
+	if (theApp->GetIP2Country() && theApp->GetIP2Country()->IsEnabled()) {
+		AddTag(CECTag(EC_TAG_CLIENT_COUNTRY,
+			       theApp->GetIP2Country()->GetCountryCode(client->GetFullIP())),
+			valuemap);
+	}
+#endif
 	AddTag(CECTag(EC_TAG_CLIENT_FROM, (uint64)client->GetSourceFrom()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_SERVER_IP, client->GetServerIP()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_SERVER_PORT, client->GetServerPort()), valuemap);
@@ -340,6 +394,11 @@ CEC_UpDownClient_Tag::CEC_UpDownClient_Tag(
 	if (detail_level != EC_DETAIL_INC_UPDATE) {
 		return;
 	}
+	// Friend status + DL/UP modifier (issue #423). IsFriend() is the
+	// friends-list membership (distinct from the FRIEND_SLOT reserved
+	// upload slot above); GetScoreRatio() is the GUI "DL/UP modifier".
+	AddTag(CECTag(EC_TAG_CLIENT_IS_FRIEND, client->IsFriend()), valuemap);
+	AddTag(CECTag(EC_TAG_CLIENT_SCORE_RATIO, (double)client->GetScoreRatio()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_DISABLE_VIEW_SHARED, client->HasDisabledSharedFiles()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_VERSION, client->GetVersion()), valuemap);
 	AddTag(CECTag(EC_TAG_CLIENT_MOD_VERSION, client->GetClientModString()), valuemap);
@@ -396,6 +455,32 @@ CEC_SearchFile_Tag::CEC_SearchFile_Tag(
 	}
 	if (file->HasRating()) {
 		AddTag(CECTag(EC_TAG_KNOWNFILE_RATING, (uint8)file->UserRating()), valuemap);
+	}
+	// Media metadata (issue #430). A hit carries FT_MEDIA_* tags only when
+	// the file is known/probed locally; emit each EC_TAG_KNOWNFILE_MEDIA_*
+	// (defined by issue #418) only when its value is present, so results
+	// without media cost nothing.
+	if (uint32 len = file->GetIntTagValue(FT_MEDIA_LENGTH)) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_LENGTH, len), valuemap);
+	}
+	if (uint32 br = file->GetIntTagValue(FT_MEDIA_BITRATE)) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_BITRATE, br), valuemap);
+	}
+	const wxString &codec = file->GetStrTagValue(FT_MEDIA_CODEC);
+	if (!codec.IsEmpty()) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_CODEC, codec), valuemap);
+	}
+	const wxString &artist = file->GetStrTagValue(FT_MEDIA_ARTIST);
+	if (!artist.IsEmpty()) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_ARTIST, artist), valuemap);
+	}
+	const wxString &album = file->GetStrTagValue(FT_MEDIA_ALBUM);
+	if (!album.IsEmpty()) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_ALBUM, album), valuemap);
+	}
+	const wxString &title = file->GetStrTagValue(FT_MEDIA_TITLE);
+	if (!title.IsEmpty()) {
+		AddTag(CECTag(EC_TAG_KNOWNFILE_MEDIA_TITLE, title), valuemap);
 	}
 }
 

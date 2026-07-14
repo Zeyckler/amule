@@ -76,6 +76,7 @@
 #include "PartFileConvertDlg.h"
 #endif
 #include "IPFilter.h"
+#include "CamuleArtProvider.h" // Needed for CamuleArtProvider::MakeId
 
 #include <wx/artprov.h> // Needed for wxArtProvider::GetIcon
 
@@ -1551,6 +1552,32 @@ void CamuleDlg::Add_Skin_Icon(const wxString &iconName, const wxBitmap &stdIcon,
 	if (iconName.StartsWith("Client_")) {
 		m_imagelist.Add(bmp);
 	} else if (iconName.StartsWith("Toolbar_")) {
+		if (!useSkins) {
+			// The built-in toolbar art ships as an SVG twin through
+			// CamuleArtProvider ("amule:toolbar_<name>"), which wx
+			// rasterizes at whatever size/DPI the toolbar asks for.
+			// An active skin keeps full control: its PNG takes the
+			// raster path below instead.
+			// ASCII-fold "Toolbar_Foo" to the "toolbar_foo" art id by
+			// hand: wxString::Lower() is locale-sensitive and would map
+			// 'I' to the dotless 'ı' in a Turkic locale, so
+			// "Toolbar_Import" would stop matching the embedded id.
+			wxString artName;
+			for (size_t i = 0; i < iconName.length(); ++i) {
+				wxUniChar uc = iconName[i];
+				wxUint32 ch = uc.GetValue();
+				if (ch >= 'A' && ch <= 'Z') {
+					ch += 'a' - 'A';
+				}
+				artName += wxUniChar(ch);
+			}
+			wxBitmapBundle art = wxArtProvider::GetBitmapBundle(
+				CamuleArtProvider::MakeId(artName), wxART_TOOLBAR, wxSize(32, 32));
+			if (art.IsOk()) {
+				m_tblist.push_back(art);
+				return;
+			}
+		}
 		// The toolbar art only exists at one (32x32) size. Store it as a
 		// wxBitmapBundle with a smooth 2x upscale so DPI-aware toolbars
 		// pick a correctly sized bitmap on hi-DPI screens instead of

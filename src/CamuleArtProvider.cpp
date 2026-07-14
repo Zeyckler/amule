@@ -57,12 +57,12 @@ wxBitmapBundle CamuleArtProvider::CreateBitmapBundle(
 
 	const wxString short_name = id.Mid(PREFIX.length());
 	const struct AMuleIconEntry *entry = amule_find_icon(short_name.utf8_str().data());
-	if (entry == NULL) {
+	if (entry == nullptr) {
 		return wxBitmapBundle();
 	}
 
 #ifdef wxHAS_SVG
-	if (entry->svg_data != NULL && entry->svg_len > 0) {
+	if (entry->svg_data != nullptr && entry->svg_len > 0) {
 		// FromSVG needs an explicit default (logical) size; when the
 		// caller doesn't request one, the PNG twin's natural size wins.
 		wxSize sizeDef(size);

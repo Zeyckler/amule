@@ -100,10 +100,14 @@ wxBitmapBundle CamuleArtProvider::CreateBitmapBundle(
 	if (!image.HasAlpha()) {
 		image.InitAlpha();
 	}
-	if (size != wxDefaultSize &&
-		(size.GetWidth() != image.GetWidth() || size.GetHeight() != image.GetHeight())) {
-		image = image.Scale(size.GetWidth(), size.GetHeight(), wxIMAGE_QUALITY_HIGH);
-	}
-	wxImage image2x = image.Scale(image.GetWidth() * 2, image.GetHeight() * 2, wxIMAGE_QUALITY_HIGH);
-	return wxBitmapBundle::FromBitmaps(wxBitmap(image), wxBitmap(image2x));
+	// Target logical size: the caller's request, or the PNG's natural
+	// size when it doesn't care. Derive both the 1x and 2x renditions
+	// from the original image so each is a single high-quality resample
+	// (building the 2x from an already-rescaled 1x would resample twice).
+	const wxSize target = (size == wxDefaultSize) ? wxSize(image.GetWidth(), image.GetHeight()) : size;
+	wxImage image1x = (target.GetWidth() == image.GetWidth() && target.GetHeight() == image.GetHeight())
+				  ? image
+				  : image.Scale(target.GetWidth(), target.GetHeight(), wxIMAGE_QUALITY_HIGH);
+	wxImage image2x = image.Scale(target.GetWidth() * 2, target.GetHeight() * 2, wxIMAGE_QUALITY_HIGH);
+	return wxBitmapBundle::FromBitmaps(wxBitmap(image1x), wxBitmap(image2x));
 }

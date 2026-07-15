@@ -77,6 +77,7 @@
 #endif
 #include "IPFilter.h"
 #include "CamuleArtProvider.h" // Needed for CamuleArtProvider::MakeId
+#include "CCtypeAsciiScope.h"  // Needed for locale-safe ASCII lowercasing of art ids
 
 #include <wx/artprov.h> // Needed for wxArtProvider::GetIcon
 
@@ -1556,21 +1557,15 @@ void CamuleDlg::Add_Skin_Icon(const wxString &iconName, const wxBitmap &stdIcon,
 			// rasterizes at whatever size/DPI the toolbar asks for.
 			// An active skin keeps full control: its PNG takes the
 			// raster path below instead.
-			// ASCII-fold "Toolbar_Foo" to the "toolbar_foo" art id by
-			// hand: wxString::Lower() is locale-sensitive and would map
-			// 'I' to the dotless 'ı' in a Turkic locale, so
-			// "Toolbar_Import" would stop matching the embedded id.
-			wxString artName;
-			for (size_t i = 0; i < iconName.length(); ++i) {
-				wxUniChar uc = iconName[i];
-				wxUint32 ch = uc.GetValue();
-				if (ch >= 'A' && ch <= 'Z') {
-					ch += 'a' - 'A';
-				}
-				artName += wxUniChar(ch);
-			}
+			// Fold "Toolbar_Foo" to the "toolbar_foo" art id.
+			// CCtypeAsciiScope pins LC_CTYPE to "C" so wxString::Lower()
+			// stays ASCII-correct: in a Turkic locale it would otherwise
+			// map 'I' to the dotless 'ı' and "Toolbar_Import" would no
+			// longer match the embedded id (same helper the GeoIP flag
+			// lookup uses).
+			CCtypeAsciiScope asciiCtype;
 			wxBitmapBundle art = wxArtProvider::GetBitmapBundle(
-				CamuleArtProvider::MakeId(artName), wxART_TOOLBAR, wxSize(32, 32));
+				CamuleArtProvider::MakeId(iconName.Lower()), wxART_TOOLBAR, wxSize(32, 32));
 			if (art.IsOk()) {
 				m_tblist.push_back(art);
 				return;

@@ -993,10 +993,12 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 		// Overlay art ids, indexed by the ED2KState / EKadState enums
 		// above (the Kad table is offset by EKadOff).
 		static const char *const ed2kArt[] = { "amule:status_conn_ed2k_off",
-			"amule:status_conn_ed2k_low", "amule:status_conn_ed2k_connecting",
+			"amule:status_conn_ed2k_low",
+			"amule:status_conn_ed2k_connecting",
 			"amule:status_conn_ed2k_high" };
 		static const char *const kadArt[] = { "amule:status_conn_kad_off",
-			"amule:status_conn_kad_firewalled", "amule:status_conn_kad_ok" };
+			"amule:status_conn_kad_firewalled",
+			"amule:status_conn_kad_ok" };
 
 		// Compose the globe from the base art plus one overlay arrow per
 		// network. GetBitmapFor rasterizes each bundle at this window's
@@ -1013,10 +1015,14 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 
 			bitmapDC.DrawBitmap(wxArtProvider::GetBitmapBundle(kadArt[kadState - EKadOff])
 						    .GetBitmapFor(connBitmap),
-				0, 0, true);
-			bitmapDC.DrawBitmap(wxArtProvider::GetBitmapBundle(ed2kArt[ed2kState])
-						    .GetBitmapFor(connBitmap),
-				0, 0, true);
+				0,
+				0,
+				true);
+			bitmapDC.DrawBitmap(
+				wxArtProvider::GetBitmapBundle(ed2kArt[ed2kState]).GetBitmapFor(connBitmap),
+				0,
+				0,
+				true);
 		}
 
 		connBitmap->SetBitmap(statusIcon);
@@ -1091,8 +1097,10 @@ void CamuleDlg::ShowTransferRate()
 	}
 
 	wxStaticBitmap *bmp = CastChild("transferImg", wxStaticBitmap);
-	static const char *const speedArt[] = { "amule:status_speed_idle", "amule:status_speed_down",
-		"amule:status_speed_up", "amule:status_speed_both" };
+	static const char *const speedArt[] = { "amule:status_speed_idle",
+		"amule:status_speed_down",
+		"amule:status_speed_up",
+		"amule:status_speed_both" };
 	bmp->SetBitmap(wxArtProvider::GetBitmapBundle(
 		speedArt[(kBpsUp > 0.01 ? 2 : 0) + (kBpsDown > 0.01 ? 1 : 0)]));
 }

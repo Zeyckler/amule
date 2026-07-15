@@ -376,10 +376,10 @@ wxSizer *transferTopPane( wxWindow *parent, bool call_fit, bool set_sizer )
 
     wxBoxSizer *item1 = new wxBoxSizer( wxHORIZONTAL );
 
-    wxBitmapButton *item2 = new wxBitmapButton( parent, ID_BTNCLRCOMPL, wxArtProvider::GetBitmapBundle( "amule:transfer_clear_completed" ), wxDefaultPosition, wxSize(30,30) );
+    wxBitmapButton *item2 = new wxBitmapButton( parent, ID_BTNCLRCOMPL, wxArtProvider::GetBitmapBundle( "amule:transfer_clear_completed" ), wxDefaultPosition, wxSize(34,34) );
     item2->SetToolTip( _("Clears completed downloads") );
     item2->Enable( false );
-    item1->Add( item2, wxSizerFlags().Center().Border(wxLEFT|wxRIGHT, 5) );
+    item1->Add( item2, wxSizerFlags().Center().FixedMinSize().Border(wxLEFT|wxRIGHT, 5) );
     wxStaticText *item3 = new wxStaticText( parent, -1, _("Downloads"), wxDefaultPosition, wxDefaultSize, 0 );
     item3->SetName( "downloadsLabel" );
     item1->Add( item3, wxSizerFlags().Center().Border(wxLEFT|wxRIGHT, 5) );

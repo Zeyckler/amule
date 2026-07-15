@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="fir" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#55cc52"/>
+      <stop offset="0.55" stop-color="#3fad3e"/>
+      <stop offset="1" stop-color="#338637"/>
+    </linearGradient>
+  </defs>
+  <!-- trunk stub -->
+  <rect x="6.7" y="0.3" width="2.6" height="2.3" fill="#37653b" stroke="#2e4538" stroke-width="0.5"/>
+  <!-- chevrons: top drawn first, each lower one covers the tip above -->
+  <path d="M8 6.6 L12.2 1.8 H3.8 Z" fill="url(#fir)" stroke="#2e4538" stroke-width="0.7" stroke-linejoin="round"/>
+  <path d="M8 11.0 L13.9 5.0 H2.1 Z" fill="url(#fir)" stroke="#2e4538" stroke-width="0.7" stroke-linejoin="round"/>
+  <path d="M8 15.6 L15.4 8.4 H0.6 Z" fill="url(#fir)" stroke="#2e4538" stroke-width="0.7" stroke-linejoin="round"/>
+  <!-- gloss sparks on the left arms -->
+  <path d="M6.8 13.8 L6.0 12.7" fill="none" stroke="#cafac9" stroke-width="0.8" opacity="0.9" stroke-linecap="round"/>
+  <path d="M6.2 10.1 L5.0 8.6" fill="none" stroke="#cafac9" stroke-width="0.8" opacity="0.85" stroke-linecap="round"/>
+  <path d="M5.6 6.3 L4.0 4.4" fill="none" stroke="#cafac9" stroke-width="0.8" opacity="0.8" stroke-linecap="round"/>
+</svg>

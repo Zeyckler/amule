@@ -796,14 +796,6 @@ void CamuleDlg::AddServerMessageLine(wxString &message)
 
 void CamuleDlg::ShowConnectionState(bool skinChanged)
 {
-	static wxImageList status_arrows(16, 16, true, 0);
-	if (!status_arrows.GetImageCount()) {
-		// Generate the image list (This is only done once)
-		for (int t = 0; t < 7; ++t) {
-			status_arrows.Add(connImages(t));
-		}
-	}
-
 	// Wipe the Server Info text ctrl on any transition that leaves it
 	// showing messages from a server we're no longer talking to:
 	//   1) connected -> disconnected
@@ -998,16 +990,34 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 		wxStaticBitmap *connBitmap = CastChild("connImage", wxStaticBitmap);
 		wxCHECK_RET(connBitmap, "'connImage' widget not found");
 
-		wxBitmap statusIcon = connBitmap->GetBitmap();
+		// Overlay art ids, indexed by the ED2KState / EKadState enums
+		// above (the Kad table is offset by EKadOff).
+		static const char *const ed2kArt[] = { "amule:status_conn_ed2k_off",
+			"amule:status_conn_ed2k_low", "amule:status_conn_ed2k_connecting",
+			"amule:status_conn_ed2k_high" };
+		static const char *const kadArt[] = { "amule:status_conn_kad_off",
+			"amule:status_conn_kad_firewalled", "amule:status_conn_kad_ok" };
+
+		// Compose the globe from the base art plus one overlay arrow per
+		// network. GetBitmapFor rasterizes each bundle at this window's
+		// DPI scale, so the SVG art stays crisp on hi-DPI displays.
+		wxBitmap statusIcon =
+			wxArtProvider::GetBitmapBundle("amule:status_conn_base").GetBitmapFor(connBitmap);
 		// Sanity check - otherwise there's a crash here if aMule runs out of resources
-		if (statusIcon.GetRefData() == NULL) {
+		if (!statusIcon.IsOk()) {
 			return;
 		}
 
-		wxMemoryDC bitmapDC(statusIcon);
+		{
+			wxMemoryDC bitmapDC(statusIcon);
 
-		status_arrows.Draw(kadState, bitmapDC, 0, 0, wxIMAGELIST_DRAW_TRANSPARENT);
-		status_arrows.Draw(ed2kState, bitmapDC, 0, 0, wxIMAGELIST_DRAW_TRANSPARENT);
+			bitmapDC.DrawBitmap(wxArtProvider::GetBitmapBundle(kadArt[kadState - EKadOff])
+						    .GetBitmapFor(connBitmap),
+				0, 0, true);
+			bitmapDC.DrawBitmap(wxArtProvider::GetBitmapBundle(ed2kArt[ed2kState])
+						    .GetBitmapFor(connBitmap),
+				0, 0, true);
+		}
 
 		connBitmap->SetBitmap(statusIcon);
 	}
@@ -1081,7 +1091,10 @@ void CamuleDlg::ShowTransferRate()
 	}
 
 	wxStaticBitmap *bmp = CastChild("transferImg", wxStaticBitmap);
-	bmp->SetBitmap(dlStatusImages((kBpsUp > 0.01 ? 2 : 0) + (kBpsDown > 0.01 ? 1 : 0)));
+	static const char *const speedArt[] = { "amule:status_speed_idle", "amule:status_speed_down",
+		"amule:status_speed_up", "amule:status_speed_both" };
+	bmp->SetBitmap(wxArtProvider::GetBitmapBundle(
+		speedArt[(kBpsUp > 0.01 ? 2 : 0) + (kBpsDown > 0.01 ? 1 : 0)]));
 }
 
 void CamuleDlg::DlgShutDown()

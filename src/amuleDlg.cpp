@@ -1016,7 +1016,8 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 		// straight onto it would stamp the arrows into the cached base, so
 		// they would accumulate on every later state change (and poison the
 		// base for any other consumer of the bundle). Draw into a private
-		// deep copy instead, preserving the DPI scale factor.
+		// deep copy instead. The overlays are fetched the same way, so they
+		// share baseIcon's scale factor and line up during compositing.
 		wxBitmap statusIcon(baseIcon.ConvertToImage(), -1, baseIcon.GetScaleFactor());
 
 		{
@@ -1033,6 +1034,14 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 				0,
 				true);
 		}
+
+		// GetBitmapFor() returns an *unscaled* bitmap (scale factor 1.0) whose
+		// pixel size already matches the window DPI. Setting it on the static
+		// bitmap as-is renders the globe DPI-scale times larger than the sibling
+		// status icons, which are bundle-backed and size themselves in logical
+		// units. Stamp the window's scale factor on the composite so its logical
+		// size matches theirs (a no-op at 100% DPI).
+		statusIcon.SetScaleFactor(connBitmap->GetDPIScaleFactor());
 
 		connBitmap->SetBitmap(statusIcon);
 	}

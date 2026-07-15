@@ -203,6 +203,29 @@ def main(argv):
             print(f"error: {svg} has no matching .png fallback", file=sys.stderr)
         return 1
 
+    # A duplicate art id, or a duplicate C identifier (distinct names that
+    # collide once sanitise() folds '-'/'.' to '_' -- e.g. "foo-bar" vs
+    # "foo_bar", or a top-level "flag_x.png" shadowing "flags/x.png"), would
+    # emit two byte arrays with the same symbol (a C redefinition) and make
+    # amule_find_icon() shadow one of the icons. The current icon set has no
+    # such clash; guard so a future rename fails loudly here instead of with
+    # an opaque compiler error or a silently missing icon.
+    seen_art, seen_ident, collision = {}, {}, False
+    for art_id, c_ident, png_path, _svg in entries:
+        if art_id in seen_art:
+            print(f"error: art id '{art_id}' ({png_path}) collides with {seen_art[art_id]}", file=sys.stderr)
+            collision = True
+        else:
+            seen_art[art_id] = png_path
+        if c_ident in seen_ident:
+            print(f"error: C identifier 'icon_{c_ident}' ({png_path}) collides with "
+                  f"{seen_ident[c_ident]}", file=sys.stderr)
+            collision = True
+        else:
+            seen_ident[c_ident] = png_path
+    if collision:
+        return 1
+
     emit(out_path, entries)
     n_svg = sum(1 for e in entries if e[3] is not None)
     print(f"emitted {len(entries)} icons ({n_svg} with SVG) -> {out_path}")

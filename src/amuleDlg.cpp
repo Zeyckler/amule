@@ -1003,12 +1003,21 @@ void CamuleDlg::ShowConnectionState(bool skinChanged)
 		// Compose the globe from the base art plus one overlay arrow per
 		// network. GetBitmapFor rasterizes each bundle at this window's
 		// DPI scale, so the SVG art stays crisp on hi-DPI displays.
-		wxBitmap statusIcon =
+		const wxBitmap baseIcon =
 			wxArtProvider::GetBitmapBundle("amule:status_conn_base").GetBitmapFor(connBitmap);
 		// Sanity check - otherwise there's a crash here if aMule runs out of resources
-		if (!statusIcon.IsOk()) {
+		if (!baseIcon.IsOk()) {
 			return;
 		}
+
+		// GetBitmapFor() hands back the art-provider-cached bundle's own
+		// (copy-on-write) bitmap, and a wxMemoryDC draws into that shared
+		// pixel buffer without unsharing it. Compositing the overlays
+		// straight onto it would stamp the arrows into the cached base, so
+		// they would accumulate on every later state change (and poison the
+		// base for any other consumer of the bundle). Draw into a private
+		// deep copy instead, preserving the DPI scale factor.
+		wxBitmap statusIcon(baseIcon.ConvertToImage(), -1, baseIcon.GetScaleFactor());
 
 		{
 			wxMemoryDC bitmapDC(statusIcon);

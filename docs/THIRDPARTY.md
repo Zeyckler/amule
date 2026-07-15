@@ -58,20 +58,3 @@ The framework is statically linked into every test binary but is NOT
 linked into shipped daemon binaries (`amule`, `amuled`, `amulegui`,
 `amuleweb`, `amuleapi`), so the LGPL relinking clause does not constrain
 end-user binary distribution.
-
-## Crystal Project icons
-
-The Preferences "Directories" icon embeds the Tux penguin from the
-Crystal Project icon set by Everaldo Coelho. License: GNU LGPL v2.1.
-
-The penguin ships as editable vector art at
-[`src/icons/prefs_directories.svg`](../src/icons/prefs_directories.svg)
-(redrawn from the Crystal Project original) and is compiled into the GUI
-binaries via the generated icon table. The LGPL v2.1 text is the same one
-reproduced for muleunit at
-[`unittests/muleunit/license.txt`](../unittests/muleunit/license.txt).
-As LGPL 2.1 §6(c) requires, this credit is also shown at runtime in
-aMule's About dialog.
-
-> Crystal Project icon set — Copyright (c) Everaldo Coelho
-> Licensed under the GNU Lesser General Public License, version 2.1.

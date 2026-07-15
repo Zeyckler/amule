@@ -84,13 +84,7 @@ CAboutDlg::CAboutDlg(wxWindow *parent)
 	wxString credits;
 	credits << _("Copyright (c) 2003-2026 aMule Team \n\n") << _("Part of aMule is based on \n")
 		<< _("Kademlia: Peer-to-peer routing based on the XOR metric.\n")
-		<< _(" Copyright (c) 2002-2011 Petar Maymounkov ( petar@maymounkov.org )\n")
-		// LGPL 2.1 s.6(c): the Crystal Project icon set (the Tux in the
-		// Preferences "Directories" icon) must be credited among the
-		// copyright notices shown to the user. Kept out of _() so the
-		// attribution is not translated. See docs/THIRDPARTY.md.
-		<< wxT("\nThe Directories icon is from the Crystal Project icon set\n")
-		<< wxT(" Copyright (c) Everaldo Coelho ( LGPL v2.1 )\n");
+		<< _(" Copyright (c) 2002-2011 Petar Maymounkov ( petar@maymounkov.org )\n");
 	credits.Trim();
 
 	// aMule logo on the left, matching the previous wxMessageBox About.

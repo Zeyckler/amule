@@ -498,6 +498,12 @@ void ExternalConn::ResetAllLogs()
 	}
 }
 
+CExternalConnListener::CExternalConnListener(const amuleIPV4Address &adr, int flags, ExternalConn *conn)
+: CLibSocketServer(adr, flags, thePrefs::GetECNetworkInterface())
+, m_conn(conn)
+{
+}
+
 void CExternalConnListener::OnAccept()
 {
 	CECServerSocket *sock = new CECServerSocket(m_conn->m_ec_notifier);
@@ -2150,6 +2156,15 @@ CECPacket *CECServerSocket::ProcessRequest2(const CECPacket *request)
 				request->GetTagByNameSafe(EC_TAG_KNOWNFILE_COMMENT)->GetStringData();
 			uint8 newRating = request->GetTagByNameSafe(EC_TAG_KNOWNFILE_RATING)->GetInt();
 			CoreNotify_KnownFile_Comment_Set(file, newComment, newRating);
+		}
+		response = new CECPacket(EC_OP_NOOP);
+		break;
+	}
+	case EC_OP_VERIFY_LOCAL_DATA: {
+		CMD4Hash hash = request->GetTagByNameSafe(EC_TAG_KNOWNFILE)->GetMD4Data();
+		CKnownFile *file = theApp->sharedfiles->GetFileByID(hash);
+		if (file) {
+			theApp->sharedfiles->VerifyLocalData(file);
 		}
 		response = new CECPacket(EC_OP_NOOP);
 		break;

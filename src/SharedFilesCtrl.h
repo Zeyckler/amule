@@ -195,9 +195,23 @@ private:
 	 */
 	void OnAddCollection(wxCommandEvent &WXUNUSED(evt));
 
-#ifndef CLIENT_GUI
 	void OnVerifyLocalData(wxCommandEvent &WXUNUSED(evt));
-#endif
+
+	/**
+	 * Opens the file-details dialog for the selected shared file. Reuses the
+	 * download list's CFileDetailDialog, which shows the sharing-side rows and
+	 * hides the download-only ones based on each file's state.
+	 */
+	void OnViewFileDetails(wxCommandEvent &event);
+
+	/**
+	 * Double-click / Enter on a row also opens the file-details dialog, for
+	 * parity with the downloads list.
+	 */
+	void OnItemActivated(wxListEvent &event);
+
+	/** Shared helper: open CFileDetailDialog anchored on the clicked row. */
+	void ShowFileDetailDialog(long focused);
 
 	//! Pointer used to ensure that the menu isn't displayed twice.
 	wxMenu *m_menu;

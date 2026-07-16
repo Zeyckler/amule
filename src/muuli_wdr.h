@@ -130,6 +130,21 @@ wxSizer *messagePage(wxWindow *parent, bool call_fit = TRUE, bool set_sizer = TR
 #define IDC_FD_MEDIA_ALBUM 10458
 #define IDC_FD_MEDIA_TITLE 10459
 #define IDC_CMSEARCHKAD 10460
+// File-details dialog: the download-only sections live in one panel that is
+// hidden for non-downloading shared files; the sharing stats live in another.
+#define IDC_FD_DOWNLOAD_PANEL 10461
+#define IDC_FD_SHARING_PANEL 10462
+#define IDC_FD_SHARE_REQ 10463
+#define IDC_FD_SHARE_ACC 10464
+#define IDC_FD_SHARE_XFER 10465
+#define IDC_FD_SHARE_RATIO 10466
+#define IDC_FD_SHARE_COMPLSRC 10467
+#define IDC_FD_SHARE_ONQUEUE 10468
+#define IDC_FD_SHARE_UPPRIO 10469
+#define IDC_FD_SHARE_UPSPEED 10470
+#define IDC_FD_SHARE_UPCOUNT 10471
+#define IDC_FD_SHARE_SINCE 10472
+#define IDC_FD_SHARE_LASTUP 10473
 #define IDC_LISTCTRLFILENAMES 10051
 #define IDC_TAKEOVER 10052
 #define IDC_CMTBT 10053
@@ -248,6 +263,11 @@ wxSizer *PreferencesGeneralTab(wxWindow *parent, bool call_fit = TRUE, bool set_
 // of the current range). Its label IDC_INTERFACETEXT lives in the 10355+
 // orphan-label band below.
 #define IDC_INTERFACE 10410
+// EC-listener bind-to-interface control + its label (Remote Controls tab).
+// Separate from the P2P IDC_INTERFACE above so external-connection traffic can
+// bind to its own interface (issue #330).
+#define IDC_EC_INTERFACE 10474
+#define IDC_EC_INTERFACETEXT 10475
 #define ID_TEXT 10140
 #define IDC_MAXSOURCEPERFILE 10141
 #define IDC_MAXCON 10142

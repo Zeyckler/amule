@@ -236,6 +236,11 @@ public:
 	void UpdateAutoUpPriority();
 #ifdef CLIENT_GUI
 	uint16 GetQueuedCount() const { return m_queuedCount; }
+	// Live upload activity received over EC (issue #466). amulegui has no
+	// m_ClientUploadList, so these mirror the core getters below by returning
+	// the last values decoded in CKnownFilesRem::ProcessItemUpdate.
+	uint32 GetUploadDatarate() const { return m_uploadDatarateEC; }
+	uint16 GetTransferringClientCount() const { return m_transferringClientCountEC; }
 #else
 	uint16 GetQueuedCount() const { return (uint16)m_ClientUploadList.size(); }
 	// Live upload activity for this shared file (issue #466), summarised
@@ -244,6 +249,7 @@ public:
 	// these over EC rather than computing them.
 	uint32 GetUploadDatarate() const;          // sum of per-client upload speed (B/s)
 	uint16 GetTransferringClientCount() const; // clients currently US_UPLOADING
+	void VerifyLocalData() const;
 #endif
 
 	// Timestamp of the last time data was uploaded for this file, and when
@@ -396,6 +402,8 @@ public:
 private:
 	uint8 m_iUpPriorityEC;
 	uint16 m_queuedCount;
+	uint32 m_uploadDatarateEC;
+	uint16 m_transferringClientCountEC;
 
 protected:
 	//! The AICH master-hash, if it is known.

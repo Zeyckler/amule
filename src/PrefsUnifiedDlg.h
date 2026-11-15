@@ -50,10 +50,7 @@ class wxPanel;
 class wxSearchCtrl;
 class wxStaticText;
 class wxKeyEvent;
-class wxDataViewListCtrl;
-class wxDataViewColumn;
-class wxDataViewEvent;
-class wxShowEvent;
+class PrefsSidebar;
 
 class wxCommandEvent;
 class wxListEvent;
@@ -230,7 +227,7 @@ private:
 	//! current page by widget rather than list index, which shifts when a tab (server /
 	//! IP2Country) is hidden.
 	wxPanel *m_aMuleTweaksWidget = nullptr;
-	wxDataViewListCtrl *m_PrefsIcons;
+	PrefsSidebar *m_PrefsIcons;
 	//! `pages[]` index for every page widget, by that same stable position (only which pages
 	//! are VISIBLE in m_PrefsIcons changes). Each visible row's item data is one of these, so
 	//! OnPrefsPageChange identifies a page by the stable index rather than by the row's live
@@ -238,24 +235,9 @@ private:
 	std::vector<wxPanel *> m_pageWidgets;
 	//! Page icons, in `pages[]` order -- kept so RebuildSidebar can re-create any row.
 	std::vector<wxBitmapBundle> m_pageIcons;
-	//! The sidebar's single icon+text column, kept so its width can be
-	//! replaced with the control's own measurement on first show.
-	wxDataViewColumn *m_sidebarColumn = nullptr;
-#ifdef __WXMAC__
-	//! Widest label as the control's own font measures it. A reported width
-	//! narrower than this cannot be a measurement of icon-plus-text.
-	int m_sidebarTextWidth = 0;
-	//! The measurement is a one-off; the dialog is shown more than once.
-	bool m_sidebarMeasured = false;
-#endif
 	void EnableServerTab(bool enable);
 	//! pages[] index of each sidebar row, in row order.
 	std::vector<unsigned> ShownPages() const;
-#ifdef __WXMAC__
-	void OnShowMeasureSidebar(wxShowEvent &event);
-#endif
-	//! Applies a column width, and the control width that fits it.
-	void SetSidebarWidth(int columnWidth);
 
 	void OnOk(wxCommandEvent &event);
 	void OnCancel(wxCommandEvent &event);
@@ -318,7 +300,7 @@ public:
 	// model as autostart, gated by a confirm dialog when a non-aMule handler is currently in
 	// place.
 	void HandleProtocolToggle(HandlerTarget scheme, int checkboxId, bool wanted);
-	void OnPrefsPageChange(wxDataViewEvent &event);
+	void OnPrefsPageChange(wxCommandEvent &event);
 	void OnScrollBarChange(wxScrollEvent &event);
 	void OnBandwidthCalculator(wxCommandEvent &event);
 	void OnRateLimitChanged(wxSpinEvent &event);
